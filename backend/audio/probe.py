@@ -2,7 +2,7 @@
 FFprobe integration — análise técnica real de áudio.
 
 Responsabilidades:
-- localizar ffprobe de forma segura (sem shell=True)
+- localizar ffprobe de forma segura (sem uso de shell)
 - executar ffprobe com timeout e argumentos como lista
 - validar existência de stream de áudio
 - normalizar metadados para a API
@@ -162,7 +162,7 @@ def probe_audio(path: Path, file_id: Optional[str] = None) -> AudioMetadata:
         raise InvalidAudioError("Arquivo não encontrado.")
 
     # Defesa: garantir que path é arquivo regular dentro de uploads (chamador já validou)
-    # Não aceitamos shell=True, argumentos como lista, path convertido com str(Path)
+    # Não aceitamos uso de shell, argumentos como lista, path convertido com str(Path)
     cmd = [
         ffprobe,
         "-v",

@@ -1,6 +1,7 @@
 # Ambiente virtual
 .venv/
 venv/
+.venv-demucs/
 
 # Python
 __pycache__/
@@ -31,6 +32,9 @@ output/
 *.pth
 *.ckpt
 models/
+# Cache Demucs / PyTorch
+.torch/
+demucs_cache/
 
 # Sistema
 .DS_Store

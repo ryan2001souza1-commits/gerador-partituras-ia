@@ -63,10 +63,41 @@
           Resultados automáticos — podem exigir revisão musical. Baixa confiança indica harmonia ambígua ou ritmo instável.
         </p>
       </div>
+
+      <div id="separate-section" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Separação de instrumentos</h3>
+        <p class="hint" id="separate-hint">Separe vocais, bateria, baixo e outros (4 stems) com Demucs — modelo htdemucs (CPU).</p>
+        <button id="btn-separate" class="btn" style="background:#059669; margin-top:12px;">Separar instrumentos</button>
+        <div id="separate-status" class="status" style="display:none;"></div>
+        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Na primeira execução, o modelo pode precisar ser baixado (~80–100 MB). Processamento em CPU pode levar vários minutos.</p>
+      </div>
+
+      <div id="stems-info" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Instrumentos separados</h3>
+        <div class="stems-grid">
+          <div class="stem-item">
+            <span class="stem-label">Vocais</span>
+            <audio id="audio-vocals" controls preload="none"></audio>
+          </div>
+          <div class="stem-item">
+            <span class="stem-label">Bateria</span>
+            <audio id="audio-drums" controls preload="none"></audio>
+          </div>
+          <div class="stem-item">
+            <span class="stem-label">Baixo</span>
+            <audio id="audio-bass" controls preload="none"></audio>
+          </div>
+          <div class="stem-item">
+            <span class="stem-label">Outros</span>
+            <audio id="audio-other" controls preload="none"></audio>
+          </div>
+        </div>
+        <p id="stems-warning" class="music-warning hidden"></p>
+      </div>
     </section>
 
     <footer class="footer">
-      <small>Etapa 3 &mdash; BPM e tonalidade (maior/menor) com estimativa de confiança. Análise automática pode exigir revisão musical.</small>
+      <small>Etapa 4 &mdash; Separação em 4 stems (vocals, drums, bass, other) com Demucs htdemucs (CPU). Próxima etapa: transcrição para notas/MIDI.</small>
     </footer>
   </main>
 

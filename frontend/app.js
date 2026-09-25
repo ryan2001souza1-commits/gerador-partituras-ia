@@ -20,6 +20,16 @@ document.addEventListener("DOMContentLoaded", () => {
   const infoBpmConf = document.getElementById("info-bpm-conf");
   const musicWarning = document.getElementById("music-warning");
 
+  const separateSection = document.getElementById("separate-section");
+  const btnSeparate = document.getElementById("btn-separate");
+  const separateStatus = document.getElementById("separate-status");
+  const stemsInfo = document.getElementById("stems-info");
+  const stemsWarning = document.getElementById("stems-warning");
+
+  let currentFileId = null;
+  let pollingInterval = null;
+  let currentJobId = null;
+
   const ALLOWED_EXTS = [".mp3", ".wav", ".flac", ".m4a", ".ogg"];
   const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
 
@@ -42,6 +52,139 @@ document.addEventListener("DOMContentLoaded", () => {
     if (musicWarning) {
       musicWarning.textContent = "";
       musicWarning.classList.add("hidden");
+    }
+  }
+
+  function hideSeparateSection() {
+    if (separateSection) separateSection.classList.add("hidden");
+    if (separateStatus) {
+      separateStatus.textContent = "";
+      separateStatus.className = "status";
+      separateStatus.style.display = "none";
+    }
+    if (btnSeparate) {
+      btnSeparate.disabled = false;
+      btnSeparate.textContent = "Separar instrumentos";
+    }
+    if (pollingInterval) {
+      clearInterval(pollingInterval);
+      pollingInterval = null;
+    }
+    currentJobId = null;
+  }
+
+  function showSeparateSection(fileId) {
+    currentFileId = fileId;
+    if (separateSection) separateSection.classList.remove("hidden");
+    // Verifica se stems já existem para exibir imediatamente
+    checkExistingStems(fileId);
+  }
+
+  function hideStemsInfo() {
+    if (stemsInfo) stemsInfo.classList.add("hidden");
+    if (stemsWarning) {
+      stemsWarning.textContent = "";
+      stemsWarning.classList.add("hidden");
+    }
+    ["vocals","drums","bass","other"].forEach(stem => {
+      const el = document.getElementById(`audio-${stem}`);
+      if (el) {
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+      }
+    });
+  }
+
+  function showStems(fileId) {
+    if (!stemsInfo) return;
+    const stems = ["vocals","drums","bass","other"];
+    stems.forEach(stem => {
+      const el = document.getElementById(`audio-${stem}`);
+      if (el) {
+        el.src = `/api/stems/${encodeURIComponent(fileId)}/${stem}?t=${Date.now()}`;
+        el.load();
+      }
+    });
+    stemsInfo.classList.remove("hidden");
+  }
+
+  function updateSeparateStatus(message, type) {
+    if (!separateStatus) return;
+    separateStatus.textContent = message;
+    separateStatus.className = "status visible " + (type || "info");
+    separateStatus.style.display = "block";
+  }
+
+  function clearSeparateStatus() {
+    if (!separateStatus) return;
+    separateStatus.textContent = "";
+    separateStatus.className = "status";
+    separateStatus.style.display = "none";
+  }
+
+  async function checkExistingStems(fileId) {
+    try {
+      const resp = await fetch(`/api/stems/${encodeURIComponent(fileId)}`);
+      const data = await resp.json().catch(() => null);
+      if (resp.ok && data && data.available) {
+        showStems(fileId);
+        updateSeparateStatus("Instrumentos já separados.", "success");
+        if (btnSeparate) {
+          btnSeparate.textContent = "Instrumentos já separados";
+          btnSeparate.disabled = true;
+        }
+        return true;
+      }
+    } catch (e) {
+      // ignora, apenas não mostra stems
+    }
+    return false;
+  }
+
+  async function pollJob(jobId) {
+    try {
+      const resp = await fetch(`/api/separate/status/${encodeURIComponent(jobId)}`);
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data) {
+        updateSeparateStatus("Erro ao consultar status da separação.", "error");
+        if (btnSeparate) btnSeparate.disabled = false;
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+        return;
+      }
+      const status = data.status;
+      const msg = data.message || status;
+      if (status === "queued") {
+        updateSeparateStatus(msg || "Preparando separação...", "info");
+      } else if (status === "running") {
+        // Tenta interpretar progresso honesto
+        updateSeparateStatus(msg || "Separando instrumentos... (pode levar vários minutos)", "info");
+        if (btnSeparate) btnSeparate.disabled = true;
+      } else if (status === "completed") {
+        updateSeparateStatus(msg || "Separação concluída.", "success");
+        if (btnSeparate) {
+          btnSeparate.textContent = "Separação concluída";
+          btnSeparate.disabled = true;
+        }
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+        if (data.file_id) showStems(data.file_id);
+        else if (currentFileId) showStems(currentFileId);
+      } else if (status === "failed") {
+        let friendly = msg || "Não foi possível separar os instrumentos.";
+        if (data.error && data.error.includes("Demucs não está instalado")) {
+          friendly = "Demucs não está instalado.";
+        } else if (data.error && data.error.includes("Timeout")) {
+          friendly = "A separação demorou mais que o esperado.";
+        }
+        updateSeparateStatus(friendly, "error");
+        if (btnSeparate) btnSeparate.disabled = false;
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+      }
+    } catch (e) {
+      updateSeparateStatus("Erro ao consultar status.", "error");
     }
   }
 
@@ -210,13 +353,73 @@ document.addEventListener("DOMContentLoaded", () => {
     clearStatus();
     hideAudioInfo();
     hideMusicInfo();
+    hideSeparateSection();
+    hideStemsInfo();
   });
+
+  // Botão Separar instrumentos
+  if (btnSeparate) {
+    btnSeparate.addEventListener("click", async () => {
+      if (!currentFileId) {
+        updateSeparateStatus("Nenhum arquivo analisado.", "error");
+        return;
+      }
+      btnSeparate.disabled = true;
+      const originalText = btnSeparate.textContent;
+      btnSeparate.textContent = "Iniciando separação...";
+      updateSeparateStatus("Preparando separação...", "info");
+      try {
+        const resp = await fetch(`/api/separate/${encodeURIComponent(currentFileId)}`, { method: "POST" });
+        const data = await resp.json().catch(() => null);
+        if (resp.status === 409) {
+          updateSeparateStatus("Já existe uma separação em andamento.", "error");
+          btnSeparate.disabled = false;
+          btnSeparate.textContent = originalText;
+          return;
+        }
+        if (resp.status === 503) {
+          updateSeparateStatus("Demucs não está instalado.", "error");
+          btnSeparate.disabled = false;
+          btnSeparate.textContent = originalText;
+          return;
+        }
+        if (!resp.ok || !data || !data.job_id) {
+          const msg = (data && (data.detail || data.message)) || "Não foi possível iniciar a separação.";
+          updateSeparateStatus(msg, "error");
+          btnSeparate.disabled = false;
+          btnSeparate.textContent = originalText;
+          return;
+        }
+        if (data.already_completed) {
+          updateSeparateStatus("Instrumentos já separados.", "success");
+          showStems(currentFileId);
+          btnSeparate.textContent = "Instrumentos já separados";
+          btnSeparate.disabled = true;
+          return;
+        }
+        currentJobId = data.job_id;
+        updateSeparateStatus(data.message || "Separação agendada. Carregando modelo...", "info");
+        // Polling a cada 2s
+        if (pollingInterval) clearInterval(pollingInterval);
+        pollingInterval = setInterval(() => pollJob(currentJobId), 2000);
+        // Primeira checagem rápida após 1s
+        setTimeout(() => pollJob(currentJobId), 1000);
+      } catch (e) {
+        updateSeparateStatus("Erro ao iniciar separação.", "error");
+        btnSeparate.disabled = false;
+        btnSeparate.textContent = originalText;
+      }
+    });
+  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearStatus();
     hideAudioInfo();
     hideMusicInfo();
+    hideSeparateSection();
+    hideStemsInfo();
+    currentFileId = null;
 
     const file = fileInput.files[0];
 
@@ -288,6 +491,7 @@ document.addEventListener("DOMContentLoaded", () => {
           showAudioInfo(analyzeData);
           // Mostra análise musical mesmo se parcialmente inconclusiva
           showMusicInfo(analyzeData.music || null, analyzeData.music_warning || null);
+          showSeparateSection(fileId);
           showStatus("Análise concluída.", "success");
         } else {
           const msg =

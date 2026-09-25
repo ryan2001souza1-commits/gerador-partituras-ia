@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 import logging
 from pathlib import Path
@@ -19,6 +20,31 @@ from backend.audio.probe import (
 
 from backend.audio.music_analysis import analyze_music
 
+from backend.audio.stem_separator import (
+    EXPECTED_STEMS,
+    STEMS_DIR,
+    DEMUCS_MODEL,
+    DEMUCS_DEVICE,
+    DEMUCS_JOBS,
+    DEMUCS_TIMEOUT,
+    get_demucs_python,
+    is_demucs_available,
+    get_demucs_version,
+    get_torch_info,
+    are_stems_valid,
+    get_stems_info,
+    separate_stems_async,
+)
+
+from backend.audio.job_manager import (
+    create_job,
+    get_job,
+    update_job,
+    has_active_job,
+    job_to_dict,
+    get_active_job,
+)
+
 # ---------------------------------------------------------------------------
 # Configuração centralizada
 # ---------------------------------------------------------------------------
@@ -29,9 +55,12 @@ CHUNK_SIZE = 1 * 1024 * 1024  # 1 MB por chunk
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 UPLOAD_DIR = BASE_DIR / "uploads"
+# STEMS_DIR já definido em stem_separator, mas garante existência também aqui
+STEMS_DIR_APP = STEMS_DIR  # alias para clareza
 
-# Garante que o diretório de uploads existe ao iniciar
+# Garante que diretórios existem ao iniciar
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+STEMS_DIR_APP.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -358,4 +387,266 @@ def analyze_audio(file_id: str):
     return JSONResponse(
         status_code=200,
         content=response_content,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Separação de stems — job em background
+# ---------------------------------------------------------------------------
+
+async def _run_separation_job(job_id: str, file_id: str, input_path: Path):
+    """
+    Executa separação em background, atualizando job registry.
+    Não bloqueia request; captura stdout/returncode via stem_separator.
+    """
+    try:
+        update_job(job_id, status="running", message="Separando instrumentos... (pode levar vários minutos, CPU)")
+        logger.info(f"Job {job_id} running file_id={file_id}")
+
+        # Passos graduais para progresso honesto (não percent falsa)
+        # Mensagens intermediárias
+        update_job(job_id, message="Carregando modelo htdemucs... (primeira execução pode baixar modelo)")
+
+        result = await separate_stems_async(input_path, file_id, timeout=DEMUCS_TIMEOUT)
+
+        # already_completed pode indicar que stems já existiam (idempotência)
+        if result.get("already_completed"):
+            update_job(
+                job_id,
+                status="completed",
+                message="Instrumentos já separados.",
+                stems=result.get("stems"),
+                already_completed=True,
+            )
+            logger.info(f"Job {job_id} already_completed file_id={file_id}")
+            return
+
+        # Finalizando
+        update_job(job_id, message="Finalizando stems...")
+        # Valida novamente
+        valid, _ = are_stems_valid(file_id)
+        if not valid:
+            raise RuntimeError("Validação final de stems falhou")
+
+        update_job(
+            job_id,
+            status="completed",
+            message="Separação concluída.",
+            stems=EXPECTED_STEMS,
+        )
+        logger.info(f"Job {job_id} completed file_id={file_id}")
+    except asyncio.TimeoutError as e:
+        logger.error(f"Job {job_id} timeout file_id={file_id}: {e}")
+        update_job(job_id, status="failed", message="A separação demorou mais que o esperado (timeout 45 min).", error="Timeout")
+    except TimeoutError as e:
+        logger.error(f"Job {job_id} timeout file_id={file_id}: {e}")
+        update_job(job_id, status="failed", message="A separação demorou mais que o esperado.", error=str(e))
+    except RuntimeError as e:
+        msg = str(e)
+        # Mensagens amigáveis
+        friendly = "Não foi possível separar os instrumentos."
+        if "Demucs não está instalado" in msg:
+            friendly = "Demucs não está instalado. Configure .venv-demucs com demucs==4.1.0"
+        elif "Saída incompleta" in msg:
+            friendly = "Saída incompleta: faltando stems. Tente novamente."
+        elif "vazio" in msg:
+            friendly = "Stem vazio gerado. Tente com outro arquivo."
+        logger.error(f"Job {job_id} failed file_id={file_id}: {e}")
+        update_job(job_id, status="failed", message=friendly, error=msg)
+    except Exception as e:
+        logger.error(f"Job {job_id} erro inesperado file_id={file_id}: {e}", exc_info=True)
+        update_job(job_id, status="failed", message="Não foi possível separar os instrumentos.", error=str(e))
+
+
+@app.post("/api/separate/{file_id}")
+async def separate_audio(file_id: str):
+    """
+    Inicia separação em 4 stems (vocals, drums, bass, other) via Demucs.
+    Retorna rápido com job_id (queued). Processamento em background.
+    Protege: só 1 job ativo por vez, idempotência, valida UUID e arquivo.
+    """
+    # 1. Valida UUID
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    # 2. Localiza arquivo
+    path = _find_upload_path(file_id)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+
+    # 3. Idempotência: se stems já válidos, retorna already_completed
+    valid, _ = are_stems_valid(file_id)
+    if valid:
+        job = create_job(file_id, status="completed", message="Instrumentos já separados.")
+        job.already_completed = True
+        job.stems = EXPECTED_STEMS
+        update_job(job.job_id, status="completed", message="Instrumentos já separados.", stems=EXPECTED_STEMS, already_completed=True)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "job_id": job.job_id,
+                "file_id": file_id,
+                "status": "completed",
+                "already_completed": True,
+                "message": "Instrumentos já separados.",
+                "stems": [{"name": s, "url": f"/api/stems/{file_id}/{s}"} for s in EXPECTED_STEMS],
+            },
+        )
+
+    # 4. Verifica Demucs instalado (fail fast amigável)
+    if not is_demucs_available():
+        # Não cria job; informa diretamente para não confundir polling
+        logger.warning(f"Demucs não disponível ao tentar separar file_id={file_id} python={get_demucs_python()}")
+        raise HTTPException(status_code=503, detail="Demucs não está instalado. Configure .venv-demucs com demucs==4.1.0")
+
+    # 5. Proteção um job por vez
+    if has_active_job():
+        active = get_active_job()
+        logger.warning(f"Separação já em andamento job={active.job_id if active else 'unknown'} solicitado file_id={file_id}")
+        raise HTTPException(status_code=409, detail="Já existe uma separação em andamento. Aguarde concluir.")
+
+    # 6. Cria job queued
+    job = create_job(file_id, status="queued", message="Preparando separação...")
+
+    # 7. Agenda background (não bloqueia)
+    # Mensagem inicial honesta (não percent falsa)
+    update_job(job.job_id, message="Preparando modelo htdemucs...")
+
+    asyncio.create_task(_run_separation_job(job.job_id, file_id, path))
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "job_id": job.job_id,
+            "file_id": file_id,
+            "status": "queued",
+            "already_completed": False,
+            "message": "Separação agendada. Na primeira execução, o modelo pode precisar ser baixado.",
+        },
+    )
+
+
+@app.get("/api/separate/status/{job_id}")
+def get_separate_status(job_id: str):
+    """
+    Consulta status de job de separação.
+    Retorna queued|running|completed|failed
+    """
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_id inválido.")
+
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job não encontrado. Reiniciar servidor perde jobs em memória.")
+
+    data = job_to_dict(job)
+    # Adiciona stems urls quando completed
+    if job.status == "completed" and job.file_id:
+        data["stems_info"] = get_stems_info(job.file_id)
+        # Compat: stems list com urls
+        if not data.get("stems"):
+            data["stems"] = [{"name": s, "url": f"/api/stems/{job.file_id}/{s}"} for s in EXPECTED_STEMS]
+
+    return JSONResponse(status_code=200, content={"success": True, **data})
+
+
+@app.get("/api/stems/{file_id}")
+def list_stems(file_id: str):
+    """
+    Lista stems disponíveis para file_id.
+    """
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    # Verifica se upload existe (opcional, mas valida)
+    path = _find_upload_path(file_id)
+    if path is None:
+        # Mesmo se upload removido, pode haver stems; mas retorna 404 se não houver stems nem upload
+        info = get_stems_info(file_id)
+        if not info or not info.get("available"):
+            raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+    info = get_stems_info(file_id)
+    if not info:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    return JSONResponse(status_code=200, content={"success": True, **info})
+
+
+@app.get("/api/stems/{file_id}/{stem_name}")
+def get_stem_file(file_id: str, stem_name: str):
+    """
+    Serve arquivo WAV do stem com allowlist e defesa path traversal.
+    """
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    stem = stem_name.lower().strip()
+    if stem not in EXPECTED_STEMS:
+        raise HTTPException(status_code=400, detail=f"stem_name inválido. Permitidos: {', '.join(EXPECTED_STEMS)}")
+
+    # Constrói path seguro
+    stems_dir = STEMS_DIR_APP / file_id
+    stem_path = stems_dir / f"{stem}.wav"
+
+    # Defesa resolve/relative_to
+    try:
+        # Garante que stems_dir está dentro de STEMS_DIR
+        stems_dir.resolve().relative_to(STEMS_DIR_APP.resolve())
+        # Se arquivo existe, verifica também
+        if stem_path.exists():
+            stem_path.resolve().relative_to(STEMS_DIR_APP.resolve())
+    except ValueError:
+        logger.error(f"Path traversal em get_stem file_id={file_id} stem={stem}")
+        raise HTTPException(status_code=400, detail="Caminho inválido.")
+
+    if not stem_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Stem '{stem}' não encontrado. Execute separação primeiro.")
+
+    # Verifica tamanho >0
+    try:
+        if stem_path.stat().st_size == 0:
+            raise HTTPException(status_code=500, detail="Stem vazio.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erro ao acessar stem.")
+
+    return FileResponse(str(stem_path), media_type="audio/wav", filename=f"{stem}.wav")
+
+
+# Endpoint auxiliar para debug/info Demucs (não expõe detalhes sensíveis)
+@app.get("/api/demucs/info")
+def demucs_info():
+    # Garante serialização segura: Path -> str, torch_info apenas tipos primitivos
+    demucs_py = get_demucs_python()
+    # Normaliza Path caso get_demucs_python retorne Path no futuro
+    demucs_py_str = str(demucs_py) if demucs_py is not None else None
+    torch_info = get_torch_info()
+    # Garante que torch_info é serializável (já filtrado em stem_separator)
+    # Fallback se None
+    if not isinstance(torch_info, dict):
+        torch_info = {}
+    return JSONResponse(
+        status_code=200,
+        content={
+            "demucs_python": demucs_py_str,
+            "demucs_available": bool(is_demucs_available()),
+            "demucs_version": get_demucs_version(),
+            "torch_info": torch_info,
+            "model": str(DEMUCS_MODEL),
+            "device": str(DEMUCS_DEVICE),
+            "jobs": int(DEMUCS_JOBS),
+            "timeout_seconds": int(DEMUCS_TIMEOUT),
+            "expected_stems": list(EXPECTED_STEMS),
+        },
     )

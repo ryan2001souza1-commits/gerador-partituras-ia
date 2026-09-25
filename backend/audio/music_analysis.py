@@ -5,7 +5,7 @@ Fluxo:
   arquivo original -> FFmpeg -> WAV temporário mono 22050 Hz PCM s16le -> librosa
 
 Responsabilidades:
-  - decodificar via FFmpeg de forma robusta (sem shell=True, nome seguro, limpeza)
+  - decodificar via FFmpeg de forma robusta (sem uso de shell, nome seguro, limpeza)
   - estimar BPM via HPSS percussivo + onset_strength + beat_track
   - estimar tonalidade via HPSS harmônico + chroma_cqt + comparação com perfis Krumhansl-Kessler
   - normalizar resultados e calcular confianças heurísticas (documentadas)
@@ -17,7 +17,7 @@ Mono 22050 Hz:
   - Consistente com padrões de MIR (librosa default sr=22050).
 
 Segurança:
-  - Nenhum uso de shell=True
+  - Nenhum uso de shell
   - Arquivo temporário com nome aleatório (tempfile) independente do nome original
   - Remoção garantida via try/finally
   - FFmpeg localizado via PATH + locais WinGet, argumentos como lista, timeout controlado
@@ -89,7 +89,7 @@ class MusicAnalysisResult:
 
 
 # ---------------------------------------------------------------------------
-# Localização de FFmpeg (robusta, sem shell=True)
+# Localização de FFmpeg (robusta, sem uso de shell)
 # ---------------------------------------------------------------------------
 
 def _find_ffmpeg() -> Optional[str]:
