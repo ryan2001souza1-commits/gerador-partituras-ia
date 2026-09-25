@@ -26,9 +26,17 @@ document.addEventListener("DOMContentLoaded", () => {
   const stemsInfo = document.getElementById("stems-info");
   const stemsWarning = document.getElementById("stems-warning");
 
+  const transcribeSection = document.getElementById("transcribe-section");
+  const btnTranscribe = document.getElementById("btn-transcribe");
+  const transcribeStatus = document.getElementById("transcribe-status");
+  const transcriptionInfo = document.getElementById("transcription-info");
+  const transcriptionWarning = document.getElementById("transcription-warning");
+
   let currentFileId = null;
   let pollingInterval = null;
   let currentJobId = null;
+  let transcribePollingInterval = null;
+  let currentTranscribeJobId = null;
 
   const ALLOWED_EXTS = [".mp3", ".wav", ".flac", ".m4a", ".ogg"];
   const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -107,6 +115,8 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
     stemsInfo.classList.remove("hidden");
+    // Após mostrar stems, mostra também a seção de transcrição
+    showTranscribeSection(fileId);
   }
 
   function updateSeparateStatus(message, type) {
@@ -185,6 +195,170 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     } catch (e) {
       updateSeparateStatus("Erro ao consultar status.", "error");
+    }
+  }
+
+  // Transcrição helpers
+  function hideTranscribeSection() {
+    if (transcribeSection) transcribeSection.classList.add("hidden");
+    if (transcribeStatus) {
+      transcribeStatus.textContent = "";
+      transcribeStatus.className = "status";
+      transcribeStatus.style.display = "none";
+    }
+    if (btnTranscribe) {
+      btnTranscribe.disabled = false;
+      btnTranscribe.textContent = "Transcrever para notas";
+    }
+    if (transcribePollingInterval) {
+      clearInterval(transcribePollingInterval);
+      transcribePollingInterval = null;
+    }
+    currentTranscribeJobId = null;
+  }
+
+  function showTranscribeSection(fileId) {
+    currentFileId = fileId;
+    if (transcribeSection) transcribeSection.classList.remove("hidden");
+    checkExistingTranscriptions(fileId);
+  }
+
+  function hideTranscriptionInfo() {
+    if (transcriptionInfo) transcriptionInfo.classList.add("hidden");
+    if (transcriptionWarning) {
+      transcriptionWarning.textContent = "";
+      transcriptionWarning.classList.add("hidden");
+    }
+    ["vocals","bass","other"].forEach(stem => {
+      const infoEl = document.getElementById(`trans-${stem}-info`);
+      const midiEl = document.getElementById(`trans-${stem}-midi`);
+      const jsonEl = document.getElementById(`trans-${stem}-json`);
+      if (infoEl) infoEl.textContent = "-";
+      if (midiEl) { midiEl.style.display = "none"; midiEl.removeAttribute("href"); }
+      if (jsonEl) { jsonEl.style.display = "none"; jsonEl.removeAttribute("href"); }
+    });
+  }
+
+  function showTranscriptionInfo(fileId, data) {
+    if (!transcriptionInfo) return;
+    // data pode vir de /api/transcriptions/{file_id} ou de polling
+    const stems = ["vocals","bass","other"];
+    stems.forEach(stem => {
+      const infoEl = document.getElementById(`trans-${stem}-info`);
+      const midiEl = document.getElementById(`trans-${stem}-midi`);
+      const jsonEl = document.getElementById(`trans-${stem}-json`);
+      // Tenta encontrar info no data
+      let stemData = null;
+      if (data && data.stems) {
+        stemData = data.stems.find(s => s.stem === stem);
+      } else if (data && data[stem]) {
+        stemData = data[stem];
+      }
+      const notes = stemData ? stemData.notes_count : null;
+      const warning = stemData ? stemData.warning : null;
+      if (infoEl) {
+        if (notes != null) {
+          infoEl.textContent = `${notes} notas` + (warning ? ` (${warning})` : "");
+          infoEl.className = notes === 0 ? "trans-info confidence-low" : "trans-info";
+        } else {
+          infoEl.textContent = "-";
+        }
+      }
+      if (midiEl) {
+        if (notes != null) {
+          midiEl.href = `/api/midi/${encodeURIComponent(fileId)}/${stem}`;
+          midiEl.style.display = "inline-block";
+        } else {
+          midiEl.style.display = "none";
+        }
+      }
+      if (jsonEl) {
+        if (notes != null) {
+          jsonEl.href = `/api/transcriptions/${encodeURIComponent(fileId)}/${stem}`;
+          jsonEl.textContent = "Ver eventos";
+          jsonEl.style.display = "inline-block";
+        } else {
+          jsonEl.style.display = "none";
+        }
+      }
+    });
+    transcriptionInfo.classList.remove("hidden");
+  }
+
+  function updateTranscribeStatus(message, type) {
+    if (!transcribeStatus) return;
+    transcribeStatus.textContent = message;
+    transcribeStatus.className = "status visible " + (type || "info");
+    transcribeStatus.style.display = "block";
+  }
+
+  async function checkExistingTranscriptions(fileId) {
+    try {
+      const resp = await fetch(`/api/transcriptions/${encodeURIComponent(fileId)}`);
+      const data = await resp.json().catch(() => null);
+      if (resp.ok && data && data.available) {
+        showTranscriptionInfo(fileId, data);
+        updateTranscribeStatus("Transcrição já concluída.", "success");
+        if (btnTranscribe) {
+          btnTranscribe.textContent = "Transcrição já concluída";
+          btnTranscribe.disabled = true;
+        }
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  async function pollTranscribeJob(jobId) {
+    try {
+      const resp = await fetch(`/api/transcribe/status/${encodeURIComponent(jobId)}`);
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data) {
+        updateTranscribeStatus("Erro ao consultar status da transcrição.", "error");
+        if (btnTranscribe) btnTranscribe.disabled = false;
+        clearInterval(transcribePollingInterval);
+        transcribePollingInterval = null;
+        return;
+      }
+      const status = data.status;
+      const msg = data.message || status;
+      if (status === "queued") {
+        updateTranscribeStatus(msg || "Preparando transcrição...", "info");
+      } else if (status === "running") {
+        updateTranscribeStatus(msg || "Transcrevendo... (pode levar vários minutos)", "info");
+        if (btnTranscribe) btnTranscribe.disabled = true;
+      } else if (status === "completed") {
+        updateTranscribeStatus(msg || "Transcrição concluída.", "success");
+        if (btnTranscribe) {
+          btnTranscribe.textContent = "Transcrição concluída";
+          btnTranscribe.disabled = true;
+        }
+        clearInterval(transcribePollingInterval);
+        transcribePollingInterval = null;
+        // Mostra info
+        if (data.results) showTranscriptionInfo(data.file_id || currentFileId, data.results);
+        else if (data.file_id) {
+          // busca info completa
+          const infoResp = await fetch(`/api/transcriptions/${encodeURIComponent(data.file_id)}`);
+          const infoData = await infoResp.json().catch(() => null);
+          if (infoResp.ok && infoData) showTranscriptionInfo(data.file_id, infoData);
+        } else if (currentFileId) {
+          const infoResp = await fetch(`/api/transcriptions/${encodeURIComponent(currentFileId)}`);
+          const infoData = await infoResp.json().catch(() => null);
+          if (infoResp.ok && infoData) showTranscriptionInfo(currentFileId, infoData);
+        }
+      } else if (status === "failed") {
+        let friendly = msg || "Não foi possível transcrever.";
+        if (data.error && data.error.includes("Basic Pitch não está instalado")) friendly = "Basic Pitch não está instalado.";
+        else if (data.error && data.error.includes("Timeout")) friendly = "A transcrição demorou mais que o esperado.";
+        else if (data.error && data.error.includes("Separe os instrumentos")) friendly = "Separe os instrumentos antes de transcrever.";
+        updateTranscribeStatus(friendly, "error");
+        if (btnTranscribe) btnTranscribe.disabled = false;
+        clearInterval(transcribePollingInterval);
+        transcribePollingInterval = null;
+      }
+    } catch (e) {
+      updateTranscribeStatus("Erro ao consultar status da transcrição.", "error");
     }
   }
 
@@ -355,6 +529,8 @@ document.addEventListener("DOMContentLoaded", () => {
     hideMusicInfo();
     hideSeparateSection();
     hideStemsInfo();
+    hideTranscribeSection();
+    hideTranscriptionInfo();
   });
 
   // Botão Separar instrumentos
@@ -412,6 +588,63 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // Botão Transcrever para notas
+  if (btnTranscribe) {
+    btnTranscribe.addEventListener("click", async () => {
+      if (!currentFileId) {
+        updateTranscribeStatus("Nenhum arquivo analisado.", "error");
+        return;
+      }
+      btnTranscribe.disabled = true;
+      const originalText = btnTranscribe.textContent;
+      btnTranscribe.textContent = "Iniciando transcrição...";
+      updateTranscribeStatus("Preparando transcrição...", "info");
+      try {
+        const resp = await fetch(`/api/transcribe/${encodeURIComponent(currentFileId)}`, { method: "POST" });
+        const data = await resp.json().catch(() => null);
+        if (resp.status === 409) {
+          const msg = (data && data.detail) || "Já existe uma transcrição em andamento.";
+          updateTranscribeStatus(msg, "error");
+          btnTranscribe.disabled = false;
+          btnTranscribe.textContent = originalText;
+          return;
+        }
+        if (resp.status === 503) {
+          updateTranscribeStatus("Basic Pitch não está instalado.", "error");
+          btnTranscribe.disabled = false;
+          btnTranscribe.textContent = originalText;
+          return;
+        }
+        if (!resp.ok || !data || !data.job_id) {
+          const msg = (data && (data.detail || data.message)) || "Não foi possível iniciar a transcrição.";
+          updateTranscribeStatus(msg, "error");
+          btnTranscribe.disabled = false;
+          btnTranscribe.textContent = originalText;
+          return;
+        }
+        if (data.already_completed) {
+          updateTranscribeStatus("Transcrição já concluída.", "success");
+          // Busca info completa
+          const infoResp = await fetch(`/api/transcriptions/${encodeURIComponent(currentFileId)}`);
+          const infoData = await infoResp.json().catch(() => null);
+          if (infoResp.ok && infoData) showTranscriptionInfo(currentFileId, infoData);
+          btnTranscribe.textContent = "Transcrição já concluída";
+          btnTranscribe.disabled = true;
+          return;
+        }
+        currentTranscribeJobId = data.job_id;
+        updateTranscribeStatus(data.message || "Transcrição agendada.", "info");
+        if (transcribePollingInterval) clearInterval(transcribePollingInterval);
+        transcribePollingInterval = setInterval(() => pollTranscribeJob(currentTranscribeJobId), 2000);
+        setTimeout(() => pollTranscribeJob(currentTranscribeJobId), 1000);
+      } catch (e) {
+        updateTranscribeStatus("Erro ao iniciar transcrição.", "error");
+        btnTranscribe.disabled = false;
+        btnTranscribe.textContent = originalText;
+      }
+    });
+  }
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearStatus();
@@ -419,6 +652,8 @@ document.addEventListener("DOMContentLoaded", () => {
     hideMusicInfo();
     hideSeparateSection();
     hideStemsInfo();
+    hideTranscribeSection();
+    hideTranscriptionInfo();
     currentFileId = null;
 
     const file = fileInput.files[0];

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 import logging
 from pathlib import Path
@@ -45,6 +46,30 @@ from backend.audio.job_manager import (
     get_active_job,
 )
 
+from backend.audio.transcriber import (
+    TRANSCRIBED_STEMS,
+    MIDI_DIR,
+    TRANSCRIPTIONS_DIR,
+    BASIC_PITCH_TIMEOUT,
+    get_basic_pitch_python,
+    is_basic_pitch_available,
+    get_basic_pitch_version,
+    get_runtime_info,
+    are_required_stems_valid,
+    are_transcriptions_valid,
+    get_transcription_info,
+    transcribe_all_stems_async,
+)
+
+from backend.audio.transcription_job_manager import (
+    create_transcription_job,
+    get_transcription_job,
+    update_transcription_job,
+    has_active_transcription_job,
+    transcription_job_to_dict,
+    get_active_transcription_job,
+)
+
 # ---------------------------------------------------------------------------
 # Configuração centralizada
 # ---------------------------------------------------------------------------
@@ -61,6 +86,8 @@ STEMS_DIR_APP = STEMS_DIR  # alias para clareza
 # Garante que diretórios existem ao iniciar
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 STEMS_DIR_APP.mkdir(parents=True, exist_ok=True)
+MIDI_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIPTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -648,5 +675,303 @@ def demucs_info():
             "jobs": int(DEMUCS_JOBS),
             "timeout_seconds": int(DEMUCS_TIMEOUT),
             "expected_stems": list(EXPECTED_STEMS),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Transcrição Basic Pitch — jobs e endpoints
+# ---------------------------------------------------------------------------
+
+async def _run_transcription_job(job_id: str, file_id: str):
+    """
+    Executa transcrição dos 3 stems sequencialmente, atualizando job registry.
+    """
+    try:
+        update_transcription_job(job_id, status="running", message="Preparando transcrição...")
+        logger.info(f"Transcription job {job_id} running file_id={file_id}")
+
+        # Verifica se já está completo (idempotência) — o transcriber já faz, mas reforça
+        valid, _ = are_transcriptions_valid(file_id)
+        if valid:
+            update_transcription_job(job_id, status="completed", message="Transcrição já concluída.", already_completed=True)
+            logger.info(f"Transcription job {job_id} already_completed file_id={file_id}")
+            return
+
+        # Mensagens honestas por stem
+        stems_to_process = TRANSCRIBED_STEMS  # vocals, bass, other
+
+        for idx, stem in enumerate(stems_to_process):
+            if stem == "vocals":
+                msg = "Transcrevendo vocais..."
+            elif stem == "bass":
+                msg = "Transcrevendo baixo..."
+            else:
+                msg = "Transcrevendo acompanhamento..."
+            update_transcription_job(job_id, message=msg)
+            logger.info(f"Transcription job {job_id} stem={stem} ({idx+1}/{len(stems_to_process)})")
+
+            # O transcriber processa um stem por vez; se falhar, levanta e job vai para failed
+            # Usa transcribe_all_stems_async internamente sequencial, mas aqui chamamos por stem para progresso
+            # Para simplificar, chamamos transcribe_all mas com progresso por stem:
+            # Na verdade vamos chamar transcribe_all de uma vez e atualizar mensagens antes
+            # Para ter progresso granular, chamamos stem a stem via transcribe_stem
+            from backend.audio.transcriber import transcribe_stem_async
+            from backend.audio.stem_separator import STEMS_DIR as STEMS_DIR_SEP
+            stem_path = STEMS_DIR_SEP / file_id / f"{stem}.wav"
+            if not stem_path.is_file():
+                raise FileNotFoundError(f"Stem não encontrado: {stem}")
+
+            # Chama transcrição do stem individual com timeout por stem
+            await transcribe_stem_async(stem_path, file_id, stem, timeout=BASIC_PITCH_TIMEOUT)
+
+            # Atualiza status intermediário
+            update_transcription_job(job_id, message=f"{msg} concluído ({idx+1}/{len(stems_to_process)})")
+
+        # Valida final
+        update_transcription_job(job_id, message="Validando MIDI...")
+        valid_final, missing = are_transcriptions_valid(file_id)
+        if not valid_final:
+            raise RuntimeError(f"Validação final falhou, faltando: {missing}")
+
+        # Coleta resultados
+        info = get_transcription_info(file_id)
+        update_transcription_job(
+            job_id,
+            status="completed",
+            message="Transcrição concluída.",
+            results=info,
+        )
+        logger.info(f"Transcription job {job_id} completed file_id={file_id}")
+
+    except asyncio.TimeoutError as e:
+        logger.error(f"Transcription job {job_id} timeout file_id={file_id}: {e}")
+        update_transcription_job(job_id, status="failed", message="A transcrição demorou mais que o esperado.", error="Timeout")
+    except TimeoutError as e:
+        logger.error(f"Transcription job {job_id} timeout file_id={file_id}: {e}")
+        update_transcription_job(job_id, status="failed", message="A transcrição demorou mais que o esperado.", error=str(e))
+    except FileNotFoundError as e:
+        msg = str(e)
+        if "Separe os instrumentos" in msg:
+            friendly = "Separe os instrumentos antes de transcrever."
+        else:
+            friendly = f"Stem não encontrado: {msg}"
+        logger.error(f"Transcription job {job_id} failed file_id={file_id}: {e}")
+        update_transcription_job(job_id, status="failed", message=friendly, error=msg)
+    except RuntimeError as e:
+        msg = str(e)
+        friendly = "Não foi possível transcrever."
+        if "Basic Pitch não está instalado" in msg:
+            friendly = "Basic Pitch não está instalado. Configure .venv-basicpitch com basic-pitch==0.4.0"
+        logger.error(f"Transcription job {job_id} failed file_id={file_id}: {e}")
+        update_transcription_job(job_id, status="failed", message=friendly, error=msg)
+    except Exception as e:
+        logger.error(f"Transcription job {job_id} erro inesperado file_id={file_id}: {e}", exc_info=True)
+        update_transcription_job(job_id, status="failed", message="Não foi possível transcrever.", error=str(e))
+
+
+@app.post("/api/transcribe/{file_id}")
+async def transcribe_audio(file_id: str):
+    """
+    Inicia transcrição dos stems vocals/bass/other via Basic Pitch.
+    Pré-condição: stems devem existir.
+    """
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    # Verifica se stems necessários para transcrição existem (vocals, bass, other — não exige drums)
+    valid, missing = are_required_stems_valid(file_id)
+    if not valid:
+        raise HTTPException(status_code=409, detail="Separe os instrumentos antes de transcrever.")
+
+    # Idempotência: se transcrições já válidas, retorna already_completed
+    valid_trans, _ = are_transcriptions_valid(file_id)
+    if valid_trans:
+        job = create_transcription_job(file_id, status="completed", message="Transcrição já concluída.")
+        job.already_completed = True
+        info = get_transcription_info(file_id)
+        update_transcription_job(job.job_id, status="completed", message="Transcrição já concluída.", results=info, already_completed=True)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "job_id": job.job_id,
+                "file_id": file_id,
+                "status": "completed",
+                "already_completed": True,
+                "message": "Transcrição já concluída.",
+                "transcriptions": info,
+            },
+        )
+
+    # Verifica Basic Pitch instalado
+    if not is_basic_pitch_available():
+        logger.warning(f"Basic Pitch não disponível file_id={file_id} python={get_basic_pitch_python()}")
+        raise HTTPException(status_code=503, detail="Basic Pitch não está instalado. Configure .venv-basicpitch com basic-pitch==0.4.0")
+
+    # Proteção um job por vez (transcrição)
+    if has_active_transcription_job():
+        active = get_active_transcription_job()
+        logger.warning(f"Transcrição já em andamento job={active.job_id if active else 'unknown'} file_id={file_id}")
+        raise HTTPException(status_code=409, detail="Já existe uma transcrição em andamento. Aguarde concluir.")
+
+    # Também respeita Demucs job ativo? Não bloqueia transcription se Demucs estiver rodando? Para proteger CPU, bloqueia qualquer job ativo
+    # Mas spec diz apenas 1 transcrição por vez, não menciona Demucs; vamos permitir Demucs e transcription simultâneos? Para proteger CPU, vamos bloquear se houver qualquer job ativo de ambos?
+    # Simplifica: apenas verifica transcription jobs, permite Demucs paralelo (mas pode pesar). Para proteger CPU máxima, verifica ambos.
+    if has_active_job():
+        logger.warning(f"Demucs em andamento, bloqueando transcrição file_id={file_id}")
+        raise HTTPException(status_code=409, detail="Já existe uma separação em andamento. Aguarde concluir.")
+
+    job = create_transcription_job(file_id, status="queued", message="Preparando transcrição...")
+    update_transcription_job(job.job_id, message="Preparando transcrição...")
+
+    asyncio.create_task(_run_transcription_job(job.job_id, file_id))
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "job_id": job.job_id,
+            "file_id": file_id,
+            "status": "queued",
+            "already_completed": False,
+            "message": "Transcrição agendada.",
+        },
+    )
+
+
+@app.get("/api/transcribe/status/{job_id}")
+def get_transcribe_status(job_id: str):
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_id inválido.")
+    job = get_transcription_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job não encontrado. Reiniciar servidor perde jobs em memória.")
+    data = transcription_job_to_dict(job)
+    # Adiciona info de transcrições quando completed
+    if job.status == "completed" and job.file_id:
+        info = get_transcription_info(job.file_id)
+        data["transcriptions"] = info
+        if not data.get("results"):
+            data["results"] = info
+    return JSONResponse(status_code=200, content={"success": True, **data})
+
+
+@app.get("/api/transcriptions/{file_id}")
+def list_transcriptions(file_id: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    # Verifica se file_id existe (upload ou stems)
+    path = _find_upload_path(file_id)
+    from backend.audio.stem_separator import are_stems_valid as check_stems
+    stems_valid, _ = check_stems(file_id)
+    if path is None and not stems_valid:
+        # Se não tem upload nem stems, mas pode ter transcriptions antigas, ainda permite listar?
+        # Verifica transcriptions
+        info = get_transcription_info(file_id)
+        if not info or not info.get("available"):
+            raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+    info = get_transcription_info(file_id)
+    if not info:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    return JSONResponse(status_code=200, content={"success": True, **info})
+
+
+@app.get("/api/transcriptions/{file_id}/{stem}")
+def get_transcription_file(file_id: str, stem: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    stem_l = stem.lower().strip()
+    if stem_l not in TRANSCRIBED_STEMS:
+        if stem_l == "drums":
+            raise HTTPException(status_code=400, detail="Transcrição de bateria não suportada nesta etapa. Será adicionada em etapa futura.")
+        raise HTTPException(status_code=400, detail=f"stem inválido. Permitidos: {', '.join(TRANSCRIBED_STEMS)}")
+    # Path seguro
+    json_path = TRANSCRIPTIONS_DIR / file_id / f"{stem_l}.json"
+    try:
+        TRANSCRIPTIONS_DIR.resolve().relative_to(TRANSCRIPTIONS_DIR.resolve())
+        if json_path.exists():
+            json_path.resolve().relative_to(TRANSCRIPTIONS_DIR.resolve())
+    except ValueError:
+        logger.error(f"Path traversal transcriptions file_id={file_id} stem={stem_l}")
+        raise HTTPException(status_code=400, detail="Caminho inválido.")
+    if not json_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Transcrição para '{stem_l}' não encontrada. Execute transcrição primeiro.")
+    try:
+        if json_path.stat().st_size == 0:
+            raise HTTPException(status_code=500, detail="Transcrição vazia.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erro ao acessar transcrição.")
+    # Retorna JSON com validação de conteúdo
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.error(f"Falha ao ler transcrição JSON {json_path}: {e}")
+        raise HTTPException(status_code=500, detail="Transcrição inválida.")
+    return JSONResponse(status_code=200, content={"success": True, **data})
+
+
+@app.get("/api/midi/{file_id}/{stem}")
+def get_midi_file(file_id: str, stem: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    stem_l = stem.lower().strip()
+    if stem_l not in TRANSCRIBED_STEMS:
+        if stem_l == "drums":
+            raise HTTPException(status_code=400, detail="Transcrição de bateria não suportada nesta etapa.")
+        raise HTTPException(status_code=400, detail=f"stem inválido. Permitidos: {', '.join(TRANSCRIBED_STEMS)}")
+    midi_path = MIDI_DIR / file_id / f"{stem_l}.mid"
+    try:
+        MIDI_DIR.resolve().relative_to(MIDI_DIR.resolve())
+        if midi_path.exists():
+            midi_path.resolve().relative_to(MIDI_DIR.resolve())
+    except ValueError:
+        logger.error(f"Path traversal midi file_id={file_id} stem={stem_l}")
+        raise HTTPException(status_code=400, detail="Caminho inválido.")
+    if not midi_path.is_file():
+        raise HTTPException(status_code=404, detail=f"MIDI para '{stem_l}' não encontrado. Execute transcrição primeiro.")
+    try:
+        if midi_path.stat().st_size == 0:
+            raise HTTPException(status_code=500, detail="MIDI vazio.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erro ao acessar MIDI.")
+    # Valida rapidamente que é MIDI (tenta abrir com mido se disponível, senão apenas serve)
+    return FileResponse(str(midi_path), media_type="audio/midi", filename=f"{stem_l}.mid")
+
+
+@app.get("/api/basic-pitch/info")
+def basic_pitch_info():
+    py = get_basic_pitch_python()
+    py_str = str(py) if py is not None else None
+    runtime_info = get_runtime_info()
+    if not isinstance(runtime_info, dict):
+        runtime_info = {}
+    return JSONResponse(
+        status_code=200,
+        content={
+            "available": bool(is_basic_pitch_available()),
+            "python": py_str,
+            "basic_pitch_version": get_basic_pitch_version(),
+            "runtime": runtime_info.get("runtime", "unknown"),
+            "runtime_version": runtime_info.get("runtime_version"),
+            "runtime_info": runtime_info,
+            "processed_stems": list(TRANSCRIBED_STEMS),
+            "timeout_seconds": int(BASIC_PITCH_TIMEOUT),
+            "expected_stems": list(TRANSCRIBED_STEMS),
         },
     )

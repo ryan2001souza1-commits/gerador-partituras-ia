@@ -94,10 +94,47 @@
         </div>
         <p id="stems-warning" class="music-warning hidden"></p>
       </div>
+
+      <div id="transcribe-section" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Transcrição para notas</h3>
+        <p class="hint" id="transcribe-hint">Transcreva vocais, baixo e outros para MIDI com Basic Pitch (ONNX/TensorFlow).</p>
+        <button id="btn-transcribe" class="btn" style="background:#7c3aed; margin-top:12px;">Transcrever para notas</button>
+        <div id="transcribe-status" class="status" style="display:none;"></div>
+        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Bateria: transcrição rítmica será adicionada em etapa futura. Processamento em CPU pode levar alguns minutos (3 stems sequenciais).</p>
+      </div>
+
+      <div id="transcription-info" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Transcrição</h3>
+        <div class="stems-grid" id="transcription-grid">
+          <div class="stem-item" id="trans-vocals-card">
+            <span class="stem-label">Vocais</span>
+            <span class="trans-info" id="trans-vocals-info">-</span>
+            <a id="trans-vocals-midi" class="btn" style="background:#0ea5e9; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MIDI</a>
+            <a id="trans-vocals-json" class="hint" style="display:none;" target="_blank">Ver eventos</a>
+          </div>
+          <div class="stem-item" id="trans-bass-card">
+            <span class="stem-label">Baixo</span>
+            <span class="trans-info" id="trans-bass-info">-</span>
+            <a id="trans-bass-midi" class="btn" style="background:#0ea5e9; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MIDI</a>
+            <a id="trans-bass-json" class="hint" style="display:none;" target="_blank">Ver eventos</a>
+          </div>
+          <div class="stem-item" id="trans-other-card">
+            <span class="stem-label">Outros</span>
+            <span class="trans-info" id="trans-other-info">-</span>
+            <a id="trans-other-midi" class="btn" style="background:#0ea5e9; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MIDI</a>
+            <a id="trans-other-json" class="hint" style="display:none;" target="_blank">Ver eventos</a>
+          </div>
+          <div class="stem-item" id="trans-drums-card" style="opacity:0.7;">
+            <span class="stem-label">Bateria</span>
+            <span class="trans-info">Transcrição rítmica será adicionada em etapa futura.</span>
+          </div>
+        </div>
+        <p id="transcription-warning" class="music-warning hidden"></p>
+      </div>
     </section>
 
     <footer class="footer">
-      <small>Etapa 4 &mdash; Separação em 4 stems (vocals, drums, bass, other) com Demucs htdemucs (CPU). Próxima etapa: transcrição para notas/MIDI.</small>
+      <small>Etapa 5 &mdash; Transcrição para MIDI (vocals, bass, other) com Basic Pitch. Próxima etapa: quantização + MusicXML/MuseScore.</small>
     </footer>
   </main>
 
