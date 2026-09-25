@@ -3,6 +3,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const fileInput = document.getElementById("file-input");
   const btn = document.getElementById("btn-analisar");
   const statusEl = document.getElementById("status");
+  const audioInfo = document.getElementById("audio-info");
+
+  const infoDuration = document.getElementById("info-duration");
+  const infoFormat = document.getElementById("info-format");
+  const infoCodec = document.getElementById("info-codec");
+  const infoSample = document.getElementById("info-sample");
+  const infoChannels = document.getElementById("info-channels");
+  const infoBitrate = document.getElementById("info-bitrate");
+  const infoSize = document.getElementById("info-size");
 
   const ALLOWED_EXTS = [".mp3", ".wav", ".flac", ".m4a", ".ogg"];
   const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -17,15 +26,67 @@ document.addEventListener("DOMContentLoaded", () => {
     statusEl.className = "status";
   }
 
+  function hideAudioInfo() {
+    audioInfo.classList.add("hidden");
+  }
+
+  function showAudioInfo(data) {
+    infoDuration.textContent = data.duration_formatted || (data.duration != null ? String(data.duration) : "-");
+    infoFormat.textContent = data.format ? data.format.toUpperCase() : "-";
+    infoCodec.textContent = data.codec ? data.codec.toUpperCase() : "-";
+    infoSample.textContent = formatSampleRate(data.sample_rate);
+    infoChannels.textContent = formatChannels(data.channels);
+    infoBitrate.textContent = formatBitrate(data.bitrate);
+    infoSize.textContent = formatSize(data.size_bytes);
+    audioInfo.classList.remove("hidden");
+  }
+
+  function formatSampleRate(sr) {
+    if (sr == null) return "-";
+    if (sr >= 1000) {
+      const khz = sr / 1000;
+      // 44100 -> 44.1, 48000 -> 48
+      return (Number.isInteger(khz) ? khz.toFixed(0) : khz.toFixed(1)) + " kHz";
+    }
+    return sr + " Hz";
+  }
+
+  function formatBitrate(br) {
+    if (br == null) return "-";
+    const kbps = Math.round(br / 1000);
+    return kbps + " kbps";
+  }
+
+  function formatSize(bytes) {
+    if (bytes == null) return "-";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+  }
+
+  function formatChannels(ch) {
+    if (ch == null) return "-";
+    if (ch === 1) return "Mono";
+    if (ch === 2) return "Estéreo";
+    return ch + " canais";
+  }
+
   function getExtension(filename) {
     const idx = filename.lastIndexOf(".");
     if (idx === -1) return "";
     return filename.slice(idx).toLowerCase();
   }
 
+  // Reset ao selecionar novo arquivo
+  fileInput.addEventListener("change", () => {
+    clearStatus();
+    hideAudioInfo();
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearStatus();
+    hideAudioInfo();
 
     const file = fileInput.files[0];
 
@@ -72,13 +133,38 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const data = await response.json().catch(() => null);
 
-      if (response.ok && data && data.success) {
-        showStatus(data.message || "Arquivo enviado com sucesso.", "success");
-      } else {
+      if (!response.ok || !data || !data.success) {
         const msg =
           (data && (data.detail || data.message)) ||
           "Erro ao enviar o arquivo. Tente novamente.";
         showStatus(msg, "error");
+        return;
+      }
+
+      showStatus(data.message || "Arquivo enviado com sucesso.", "success");
+
+      // Inicia análise técnica automaticamente
+      const fileId = data.file_id;
+      btn.textContent = "Analisando...";
+      showStatus("Analisando áudio...", "info");
+
+      try {
+        const analyzeResp = await fetch(`/api/analyze/${encodeURIComponent(fileId)}`, {
+          method: "GET",
+        });
+        const analyzeData = await analyzeResp.json().catch(() => null);
+
+        if (analyzeResp.ok && analyzeData && analyzeData.success) {
+          showAudioInfo(analyzeData);
+          showStatus("Análise concluída.", "success");
+        } else {
+          const msg =
+            (analyzeData && (analyzeData.detail || analyzeData.message)) ||
+            "Não foi possível analisar o áudio.";
+          showStatus(msg, "error");
+        }
+      } catch (err) {
+        showStatus("Erro ao analisar o áudio. Verifique a conexão.", "error");
       }
     } catch (err) {
       showStatus("Erro de conexão. Verifique se o servidor está ativo.", "error");

@@ -36,10 +36,23 @@
       </form>
 
       <div id="status" class="status" aria-live="polite"></div>
+
+      <div id="audio-info" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Informações do áudio</h3>
+        <div class="info-grid">
+          <div class="info-item"><span class="info-label">Duração:</span> <span id="info-duration">-</span></div>
+          <div class="info-item"><span class="info-label">Formato:</span> <span id="info-format">-</span></div>
+          <div class="info-item"><span class="info-label">Codec:</span> <span id="info-codec">-</span></div>
+          <div class="info-item"><span class="info-label">Sample rate:</span> <span id="info-sample">-</span></div>
+          <div class="info-item"><span class="info-label">Canais:</span> <span id="info-channels">-</span></div>
+          <div class="info-item"><span class="info-label">Bitrate:</span> <span id="info-bitrate">-</span></div>
+          <div class="info-item"><span class="info-label">Tamanho:</span> <span id="info-size">-</span></div>
+        </div>
+      </div>
     </section>
 
     <footer class="footer">
-      <small>Etapa 1 &mdash; Upload e validação. Análise musical será habilitada nas próximas etapas.</small>
+      <small>Etapa 2 &mdash; Análise técnica com FFprobe. BPM e tonalidade nas próximas etapas.</small>
     </footer>
   </main>
 
