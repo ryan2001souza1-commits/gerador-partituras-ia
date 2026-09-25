@@ -1,0 +1,37 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Variáveis de ambiente
+.env
+.env.*
+
+# VS Code
+.vscode/
+
+# Arquivos enviados e gerados
+uploads/
+stems/
+midi/
+output/
+
+# Áudio
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+
+# Modelos de IA
+*.pt
+*.pth
+*.ckpt
+models/
+
+# Sistema
+.DS_Store
+Thumbs.db
