@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gerador de Partituras IA</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>Gerador de Partituras IA</h1>
+      <p class="description">
+        Envie um arquivo de áudio e gere partituras editáveis para o MuseScore 4.
+        Analise BPM, tonalidade, instrumentos e crie arranjos automaticamente.
+      </p>
+    </header>
+
+    <section class="card">
+      <form id="upload-form" novalidate>
+        <label for="file-input" class="label">Selecione o arquivo de música</label>
+        <input
+          type="file"
+          id="file-input"
+          name="file"
+          accept=".mp3,.wav,.flac,.m4a,.ogg"
+        />
+        <p class="hint">
+          Formatos aceitos: <strong>.mp3</strong>, <strong>.wav</strong>, <strong>.flac</strong>, <strong>.m4a</strong>, <strong>.ogg</strong>
+          &middot; Tamanho máximo: <strong>100 MB</strong>
+        </p>
+
+        <button type="submit" id="btn-analisar" class="btn">
+          Analisar música
+        </button>
+      </form>
+
+      <div id="status" class="status" aria-live="polite"></div>
+    </section>
+
+    <footer class="footer">
+      <small>Etapa 1 &mdash; Upload e validação. Análise musical será habilitada nas próximas etapas.</small>
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
