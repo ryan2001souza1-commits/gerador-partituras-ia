@@ -4,6 +4,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btn = document.getElementById("btn-analisar");
   const statusEl = document.getElementById("status");
   const audioInfo = document.getElementById("audio-info");
+  const musicInfo = document.getElementById("music-info");
 
   const infoDuration = document.getElementById("info-duration");
   const infoFormat = document.getElementById("info-format");
@@ -12,6 +13,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const infoChannels = document.getElementById("info-channels");
   const infoBitrate = document.getElementById("info-bitrate");
   const infoSize = document.getElementById("info-size");
+
+  const infoBpm = document.getElementById("info-bpm");
+  const infoKey = document.getElementById("info-key");
+  const infoKeyConf = document.getElementById("info-key-conf");
+  const infoBpmConf = document.getElementById("info-bpm-conf");
+  const musicWarning = document.getElementById("music-warning");
 
   const ALLOWED_EXTS = [".mp3", ".wav", ".flac", ".m4a", ".ogg"];
   const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -30,6 +37,14 @@ document.addEventListener("DOMContentLoaded", () => {
     audioInfo.classList.add("hidden");
   }
 
+  function hideMusicInfo() {
+    if (musicInfo) musicInfo.classList.add("hidden");
+    if (musicWarning) {
+      musicWarning.textContent = "";
+      musicWarning.classList.add("hidden");
+    }
+  }
+
   function showAudioInfo(data) {
     infoDuration.textContent = data.duration_formatted || (data.duration != null ? String(data.duration) : "-");
     infoFormat.textContent = data.format ? data.format.toUpperCase() : "-";
@@ -39,6 +54,119 @@ document.addEventListener("DOMContentLoaded", () => {
     infoBitrate.textContent = formatBitrate(data.bitrate);
     infoSize.textContent = formatSize(data.size_bytes);
     audioInfo.classList.remove("hidden");
+  }
+
+  // Mapa de chaves técnicas -> português
+  const KEY_PT = {
+    "C": "Dó",
+    "C#": "Dó#",
+    "D": "Ré",
+    "D#": "Ré#",
+    "E": "Mi",
+    "F": "Fá",
+    "F#": "Fá#",
+    "G": "Sol",
+    "G#": "Sol#",
+    "A": "Lá",
+    "A#": "Lá#",
+    "B": "Si",
+  };
+
+  function formatKeyPT(key, mode) {
+    if (!key || !mode) return "-";
+    const pt = KEY_PT[key] || key;
+    const modePt = mode === "major" ? "maior" : mode === "minor" ? "menor" : mode;
+    return `${pt} ${modePt}`;
+  }
+
+  function formatConfidence(val) {
+    if (val == null || isNaN(val)) return "-";
+    const pct = Math.round(val * 100);
+    let level = "baixa";
+    let cls = "confidence-low";
+    if (val >= 0.75) { level = "alta"; cls = "confidence-high"; }
+    else if (val >= 0.45) { level = "média"; cls = "confidence-medium"; }
+    return { text: `${pct}% (${level})`, pct, level, cls };
+  }
+
+  function showMusicInfo(music, fallbackWarning) {
+    if (!musicInfo || !infoBpm || !infoKey) return;
+    // Trata caso music seja null ou totalmente inconclusivo
+    if (!music) {
+      infoBpm.textContent = "-";
+      infoKey.textContent = "-";
+      infoKeyConf.textContent = "-";
+      infoBpmConf.textContent = "-";
+      if (musicWarning) {
+        musicWarning.textContent = fallbackWarning || "Não foi possível determinar a estrutura musical deste áudio.";
+        musicWarning.classList.remove("hidden");
+      }
+      musicInfo.classList.remove("hidden");
+      return;
+    }
+
+    const hasBpm = music.bpm != null;
+    const hasKey = music.key && music.mode;
+
+    // BPM
+    if (hasBpm) {
+      const rounded = music.bpm_rounded != null ? music.bpm_rounded : Math.round(music.bpm);
+      infoBpm.textContent = String(rounded);
+    } else {
+      infoBpm.textContent = "-";
+    }
+
+    // Tonalidade
+    if (hasKey) {
+      infoKey.textContent = formatKeyPT(music.key, music.mode);
+    } else {
+      infoKey.textContent = "-";
+    }
+
+    // Confianças com cor por faixa
+    const kc = formatConfidence(music.key_confidence);
+    const bc = formatConfidence(music.bpm_confidence);
+
+    if (kc.text === "-") {
+      infoKeyConf.textContent = "-";
+      infoKeyConf.className = "";
+    } else {
+      infoKeyConf.textContent = kc.text;
+      infoKeyConf.className = kc.cls;
+    }
+
+    if (bc.text === "-") {
+      infoBpmConf.textContent = "-";
+      infoBpmConf.className = "";
+    } else {
+      infoBpmConf.textContent = bc.text;
+      infoBpmConf.className = bc.cls;
+    }
+
+    // Warning / baixa confiança
+    let warningText = music.warning || music.error || fallbackWarning || "";
+    // Se confiança baixa, adiciona aviso complementar se não houver
+    const lowKey = music.key_confidence != null && music.key_confidence < 0.35;
+    const lowBpm = music.bpm_confidence != null && music.bpm_confidence < 0.4;
+    if ((lowKey || lowBpm) && !warningText) {
+      warningText = "Resultado com baixa confiança — harmonia ou ritmo ambíguo. Revisão musical recomendada.";
+    }
+    if (!hasBpm && !hasKey && !warningText) {
+      warningText = "Não foi possível determinar a estrutura musical deste áudio.";
+    }
+
+    if (musicWarning) {
+      if (warningText) {
+        // Trunca levemente se muito longo mas mantém completo
+        musicWarning.textContent = warningText;
+        musicWarning.classList.remove("hidden");
+      } else {
+        musicWarning.textContent = "";
+        musicWarning.classList.add("hidden");
+      }
+    }
+
+    musicInfo.classList.remove("hidden");
   }
 
   function formatSampleRate(sr) {
@@ -81,12 +209,14 @@ document.addEventListener("DOMContentLoaded", () => {
   fileInput.addEventListener("change", () => {
     clearStatus();
     hideAudioInfo();
+    hideMusicInfo();
   });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearStatus();
     hideAudioInfo();
+    hideMusicInfo();
 
     const file = fileInput.files[0];
 
@@ -143,10 +273,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
       showStatus(data.message || "Arquivo enviado com sucesso.", "success");
 
-      // Inicia análise técnica automaticamente
+      // Inicia análise técnica + musical automaticamente
       const fileId = data.file_id;
-      btn.textContent = "Analisando...";
-      showStatus("Analisando áudio...", "info");
+      btn.textContent = "Analisando estrutura musical...";
+      showStatus("Analisando estrutura musical...", "info");
 
       try {
         const analyzeResp = await fetch(`/api/analyze/${encodeURIComponent(fileId)}`, {
@@ -156,6 +286,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
         if (analyzeResp.ok && analyzeData && analyzeData.success) {
           showAudioInfo(analyzeData);
+          // Mostra análise musical mesmo se parcialmente inconclusiva
+          showMusicInfo(analyzeData.music || null, analyzeData.music_warning || null);
           showStatus("Análise concluída.", "success");
         } else {
           const msg =

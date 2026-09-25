@@ -49,10 +49,24 @@
           <div class="info-item"><span class="info-label">Tamanho:</span> <span id="info-size">-</span></div>
         </div>
       </div>
+
+      <div id="music-info" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Análise musical</h3>
+        <div class="info-grid">
+          <div class="info-item"><span class="info-label">BPM:</span> <span id="info-bpm">-</span></div>
+          <div class="info-item"><span class="info-label">Tonalidade:</span> <span id="info-key">-</span></div>
+          <div class="info-item"><span class="info-label">Confiança do tom:</span> <span id="info-key-conf">-</span></div>
+          <div class="info-item"><span class="info-label">Estabilidade do BPM:</span> <span id="info-bpm-conf">-</span></div>
+        </div>
+        <p id="music-warning" class="music-warning hidden"></p>
+        <p class="hint" style="margin-top:10px; font-size:0.82rem;">
+          Resultados automáticos — podem exigir revisão musical. Baixa confiança indica harmonia ambígua ou ritmo instável.
+        </p>
+      </div>
     </section>
 
     <footer class="footer">
-      <small>Etapa 2 &mdash; Análise técnica com FFprobe. BPM e tonalidade nas próximas etapas.</small>
+      <small>Etapa 3 &mdash; BPM e tonalidade (maior/menor) com estimativa de confiança. Análise automática pode exigir revisão musical.</small>
     </footer>
   </main>
 

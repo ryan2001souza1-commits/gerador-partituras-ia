@@ -17,6 +17,8 @@ from backend.audio.probe import (
     FFPROBE_TIMEOUT,
 )
 
+from backend.audio.music_analysis import analyze_music
+
 # ---------------------------------------------------------------------------
 # Configuração centralizada
 # ---------------------------------------------------------------------------
@@ -277,7 +279,9 @@ async def upload_file(file: UploadFile = File(...)):
 @app.get("/api/analyze/{file_id}")
 def analyze_audio(file_id: str):
     """
-    Analisa arquivo previamente enviado e retorna metadados técnicos via FFprobe.
+    Analisa arquivo previamente enviado e retorna:
+      - metadados técnicos via FFprobe
+      - análise musical (BPM, tonalidade, modo, confiança) via librosa + FFmpeg
     """
     # 1. Valida UUID
     try:
@@ -309,19 +313,49 @@ def analyze_audio(file_id: str):
         logger.error(f"Erro inesperado ao analisar file_id={file_id}: {e}")
         raise HTTPException(status_code=500, detail="Não foi possível analisar o áudio.")
 
-    # 4. Retorna metadados normalizados
+    # 4. Análise musical (BPM, tonalidade, confiança) — não quebra análise técnica se falhar
+    music_dict = None
+    music_warning = None
+    try:
+        music_result = analyze_music(path, duration_probe=meta.duration)
+        music_dict = music_result.to_api_dict()
+        # Se houver warning técnico (ex: áudio curto), propaga como campo opcional no topo para frontend
+        if music_result.warning:
+            music_warning = music_result.warning
+        # Loga caso bpm/key sejam None mas sem erro técnico (inconclusivo)
+        if music_dict.get("bpm") is None and music_dict.get("key") is None and not music_dict.get("error"):
+            logger.info(f"analyze_music inconclusivo file_id={file_id} warning={music_warning}")
+    except Exception as e:
+        logger.error(f"Falha inesperada na análise musical file_id={file_id}: {e}", exc_info=True)
+        music_dict = {
+            "bpm": None,
+            "bpm_rounded": None,
+            "bpm_confidence": None,
+            "key": None,
+            "mode": None,
+            "key_confidence": None,
+            "error": "Não foi possível determinar a estrutura musical deste áudio.",
+        }
+        music_warning = music_dict["error"]
+
+    # 5. Retorna metadados técnicos + música
+    response_content: dict = {
+        "success": True,
+        "file_id": meta.file_id,
+        "duration": meta.duration,
+        "duration_formatted": meta.duration_formatted,
+        "format": meta.format,
+        "codec": meta.codec,
+        "sample_rate": meta.sample_rate,
+        "channels": meta.channels,
+        "bitrate": meta.bitrate,
+        "size_bytes": meta.size_bytes,
+        "music": music_dict,
+    }
+    if music_warning:
+        response_content["music_warning"] = music_warning
+
     return JSONResponse(
         status_code=200,
-        content={
-            "success": True,
-            "file_id": meta.file_id,
-            "duration": meta.duration,
-            "duration_formatted": meta.duration_formatted,
-            "format": meta.format,
-            "codec": meta.codec,
-            "sample_rate": meta.sample_rate,
-            "channels": meta.channels,
-            "bitrate": meta.bitrate,
-            "size_bytes": meta.size_bytes,
-        },
+        content=response_content,
     )

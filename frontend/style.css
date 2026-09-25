@@ -169,6 +169,35 @@ input[type="file"]:hover {
   }
 }
 
+.music-warning {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  border-radius: 6px;
+  font-size: 0.88rem;
+}
+
+.music-warning.hidden {
+  display: none;
+}
+
+.confidence-high {
+  color: #065f46;
+  font-weight: 600;
+}
+
+.confidence-medium {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.confidence-low {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
 .footer {
   text-align: center;
   margin-top: 18px;
