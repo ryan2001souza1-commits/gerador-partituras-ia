@@ -723,3 +723,64 @@ def analyze_music(
             except Exception as e:
                 logger.debug(f"Falha ao remover WAV temporário {wav_path}: {e}")
 
+
+# ---------------------------------------------------------------------------
+# Beat grid interno para Etapa 6 (não exposto ao frontend)
+# ---------------------------------------------------------------------------
+
+def get_beat_grid(input_path: Path) -> Dict[str, Any]:
+    """Retorna beat grid interno: {"beat_times": [...], "first_beat_time": float|None}.
+
+    Reaproveita o mesmo pipeline da Etapa 3 (FFmpeg -> mono 22050 -> HPSS
+    percussivo -> onset -> beat_track). NÃO expõe milhares de valores ao
+    frontend; uso interno da Etapa 6 para alinhar t=0 ao primeiro pulso.
+    Em falha, retorna {"beat_times": [], "first_beat_time": None} e o
+    chamador usa fallback beat_offset=0 com warning.
+    """
+    empty: Dict[str, Any] = {"beat_times": [], "first_beat_time": None}
+    wav_path: Optional[Path] = None
+    try:
+        try:
+            wav_path = _decode_to_wav(input_path)
+        except Exception as e:
+            logger.debug(f"get_beat_grid decode falhou: {e}")
+            return empty
+        try:
+            import librosa
+            y, sr = librosa.load(str(wav_path), sr=TARGET_SR, mono=True)
+        except Exception as e:
+            logger.debug(f"get_beat_grid load falhou: {e}")
+            return empty
+        if y is None or y.size == 0:
+            return empty
+        try:
+            y_harm, y_perc = librosa.effects.hpss(y)
+            y_use = y_perc
+            if y_use is None or np.size(y_use) == 0 or float(np.mean(np.abs(y_use))) < 1e-6:
+                y_use = y
+        except Exception:
+            y_use = y
+        try:
+            onset = librosa.onset.onset_strength(y=y_use, sr=sr)
+            _, beats = librosa.beat.beat_track(onset_envelope=onset, sr=sr)
+        except Exception as e:
+            logger.debug(f"get_beat_grid beat_track falhou: {e}")
+            return empty
+        if beats is None or len(beats) == 0:
+            return empty
+        try:
+            beat_times = librosa.frames_to_time(beats, sr=sr)
+            beat_list = [float(t) for t in beat_times if float(t) >= 0]
+            if not beat_list:
+                return empty
+            return {"beat_times": beat_list, "first_beat_time": float(beat_list[0])}
+        except Exception as e:
+            logger.debug(f"get_beat_grid conversão falhou: {e}")
+            return empty
+    finally:
+        if wav_path is not None:
+            try:
+                wav_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+

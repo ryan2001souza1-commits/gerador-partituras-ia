@@ -70,6 +70,35 @@ from backend.audio.transcription_job_manager import (
     get_active_transcription_job,
 )
 
+from backend.notation.score_generator import (
+    SCORE_STEMS as NOTATION_STEMS,
+    NOTATION_TIMEOUT,
+    are_transcriptions_ready,
+    generate_score_async,
+    get_music_context,
+    get_notation_python,
+    get_music21_version,
+    get_score_info,
+    get_score_paths,
+    is_notation_available,
+)
+
+from backend.notation.notation_job_manager import (
+    create_notation_job,
+    get_notation_job,
+    update_notation_job,
+    has_active_notation_job,
+    notation_job_to_dict,
+    get_active_notation_job,
+)
+
+from backend.notation.score_utils import (
+    SUPPORTED_KEY_MODES,
+    SUPPORTED_QUANTIZATIONS,
+    SUPPORTED_TIME_SIGNATURES,
+    validate_score_config,
+)
+
 # ---------------------------------------------------------------------------
 # Configuração centralizada
 # ---------------------------------------------------------------------------
@@ -974,4 +1003,243 @@ def basic_pitch_info():
             "timeout_seconds": int(BASIC_PITCH_TIMEOUT),
             "expected_stems": list(TRANSCRIBED_STEMS),
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Partitura MusicXML — Etapa 6 (jobs e endpoints)
+# ---------------------------------------------------------------------------
+
+async def _run_score_job(job_id: str, file_id: str, config: dict):
+    """Executa geração de MusicXML em background com progresso honesto."""
+    try:
+        update_notation_job(job_id, status="running", message="Preparando partitura...")
+        logger.info(f"Score job {job_id} running file_id={file_id} config={config}")
+
+        update_notation_job(job_id, message="Limpando notas...")
+        # Pequena cessão para o polling observar as fases
+        await asyncio.sleep(0.1)
+        update_notation_job(job_id, message="Quantizando ritmo...")
+        await asyncio.sleep(0.1)
+
+        model = await generate_score_async(
+            file_id,
+            tempo=config.get("tempo"),
+            time_signature=config.get("time_signature", "4/4"),
+            quantization=config.get("quantization", "1/16"),
+            key_mode=config.get("key_mode", "auto"),
+            timeout=NOTATION_TIMEOUT,
+        )
+
+        update_notation_job(job_id, message="Criando compassos...")
+        await asyncio.sleep(0.1)
+        update_notation_job(job_id, message="Gerando MusicXML...")
+        await asyncio.sleep(0.1)
+        update_notation_job(job_id, message="Validando MusicXML...")
+        await asyncio.sleep(0.1)
+
+        update_notation_job(
+            job_id,
+            status="completed",
+            message="Partitura concluída.",
+            results=model,
+        )
+        logger.info(f"Score job {job_id} completed file_id={file_id}")
+    except FileNotFoundError as e:
+        msg = str(e)
+        friendly = "Transcreva os instrumentos antes de gerar a partitura."
+        logger.error(f"Score job {job_id} failed file_id={file_id}: {e}")
+        update_notation_job(job_id, status="failed", message=friendly, error=msg)
+    except ValueError as e:
+        logger.error(f"Score job {job_id} config inválida file_id={file_id}: {e}")
+        update_notation_job(job_id, status="failed", message=str(e), error=str(e))
+    except TimeoutError as e:
+        logger.error(f"Score job {job_id} timeout file_id={file_id}: {e}")
+        update_notation_job(job_id, status="failed", message="A geração demorou mais que o esperado.", error=str(e))
+    except RuntimeError as e:
+        msg = str(e)
+        friendly = "Não foi possível gerar a partitura."
+        if "music21" in msg.lower() or "notação" in msg.lower():
+            friendly = "music21 não está instalado. Configure .venv-notation com music21==10.5.0"
+        logger.error(f"Score job {job_id} failed file_id={file_id}: {e}")
+        update_notation_job(job_id, status="failed", message=friendly, error=msg)
+    except Exception as e:
+        logger.error(f"Score job {job_id} erro inesperado file_id={file_id}: {e}", exc_info=True)
+        update_notation_job(job_id, status="failed", message="Não foi possível gerar a partitura.", error=str(e))
+
+
+@app.get("/api/notation/info")
+def notation_info():
+    py = get_notation_python()
+    py_str = str(py) if py is not None else None
+    return JSONResponse(
+        status_code=200,
+        content={
+            "available": bool(is_notation_available()),
+            "music21_version": get_music21_version(),
+            "python": py_str,
+            "supported_time_signatures": list(SUPPORTED_TIME_SIGNATURES),
+            "supported_quantization": list(SUPPORTED_QUANTIZATIONS),
+            "supported_key_modes": list(SUPPORTED_KEY_MODES),
+            "timeout_seconds": int(NOTATION_TIMEOUT),
+        },
+    )
+
+
+@app.post("/api/score/{file_id}")
+async def create_score(file_id: str, payload: Optional[dict] = None):
+    """Agenda geração de MusicXML. Body: {tempo, time_signature, quantization, key_mode}."""
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    body = payload or {}
+    # Defaults: tempo resolvido na geração via Etapa 3; demais explícitos
+    tempo = body.get("tempo", None)
+    time_signature = body.get("time_signature", "4/4")
+    quantization = body.get("quantization", "1/16")
+    key_mode = body.get("key_mode", "auto")
+
+    # Validação estrita (tempo None = resolver depois)
+    try:
+        if tempo is None:
+            validate_score_config(120, time_signature, quantization, key_mode)
+        else:
+            validate_score_config(tempo, time_signature, quantization, key_mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Pré-condição: transcrições vocals/bass/other
+    ok, missing = are_transcriptions_ready(file_id)
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail="Transcreva os instrumentos antes de gerar a partitura.",
+        )
+
+    # Idempotência: score existente com mesma config -> already_completed
+    try:
+        existing = get_score_info(file_id)
+        if existing and existing.get("available") and existing.get("musicxml_available"):
+            norm_tempo = None
+            if tempo is not None:
+                t = float(tempo)
+                norm_tempo = int(round(t)) if float(t).is_integer() else round(t, 2)
+            from backend.notation.score_utils import config_key as _ck
+            if norm_tempo is not None and existing.get("tempo") == norm_tempo:
+                ck = _ck(norm_tempo, time_signature, quantization, key_mode)
+                if existing.get("config_key") == ck:
+                    job = create_notation_job(file_id, status="completed", message="Partitura já gerada.")
+                    job.already_completed = True
+                    update_notation_job(
+                        job.job_id, status="completed", message="Partitura já gerada.",
+                        config={"tempo": norm_tempo, "time_signature": time_signature,
+                                "quantization": quantization, "key_mode": key_mode},
+                        results=existing, already_completed=True,
+                    )
+                    return JSONResponse(status_code=200, content={
+                        "success": True, "job_id": job.job_id, "file_id": file_id,
+                        "status": "completed", "already_completed": True,
+                        "message": "Partitura já gerada.", "score": existing,
+                    })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.debug(f"Idempotência score falhou, segue p/ geração: {e}")
+
+    if not is_notation_available():
+        logger.warning(f"music21 indisponível file_id={file_id} python={get_notation_python()}")
+        raise HTTPException(
+            status_code=503,
+            detail="music21 não está instalado. Configure .venv-notation com music21==10.5.0",
+        )
+
+    if has_active_notation_job():
+        active = get_active_notation_job()
+        logger.warning(f"Score já em andamento job={active.job_id if active else 'unknown'} file_id={file_id}")
+        raise HTTPException(status_code=409, detail="Já existe uma geração de partitura em andamento. Aguarde concluir.")
+
+    norm_tempo_cfg = None
+    if tempo is not None:
+        t = float(tempo)
+        norm_tempo_cfg = int(round(t)) if float(t).is_integer() else round(t, 2)
+    config = {
+        "tempo": norm_tempo_cfg,
+        "time_signature": time_signature,
+        "quantization": quantization,
+        "key_mode": key_mode,
+    }
+    job = create_notation_job(file_id, status="queued", message="Preparando partitura...", config=config)
+    update_notation_job(job.job_id, message="Preparando partitura...")
+    asyncio.create_task(_run_score_job(job.job_id, file_id, config))
+    return JSONResponse(status_code=200, content={
+        "success": True, "job_id": job.job_id, "file_id": file_id,
+        "status": "queued", "already_completed": False,
+        "message": "Geração de partitura agendada.", "config": config,
+    })
+
+
+@app.get("/api/score/status/{job_id}")
+def get_score_status(job_id: str):
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_id inválido.")
+    job = get_notation_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job não encontrado. Reiniciar servidor perde jobs em memória.")
+    data = notation_job_to_dict(job)
+    if job.status == "completed" and job.file_id:
+        info = get_score_info(job.file_id)
+        if info and info.get("available"):
+            data["score"] = info
+            if not data.get("results"):
+                data["results"] = info
+    return JSONResponse(status_code=200, content={"success": True, **data})
+
+
+@app.get("/api/score/{file_id}")
+def read_score(file_id: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    info = get_score_info(file_id)
+    if not info:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    if not info.get("available"):
+        raise HTTPException(status_code=404, detail="Partitura não encontrada. Gere a partitura primeiro.")
+    return JSONResponse(status_code=200, content={"success": True, **info})
+
+
+@app.get("/api/score/{file_id}/musicxml")
+def download_musicxml(file_id: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    musicxml_path, _ = get_score_paths(file_id)
+    try:
+        SCORES_BASE = musicxml_path.parents[1].resolve()
+        if musicxml_path.exists():
+            musicxml_path.resolve().relative_to(SCORES_BASE)
+        else:
+            (musicxml_path.parent.resolve()).relative_to(SCORES_BASE)
+    except ValueError:
+        logger.error(f"Path traversal score file_id={file_id}")
+        raise HTTPException(status_code=400, detail="Caminho inválido.")
+    if not musicxml_path.is_file():
+        raise HTTPException(status_code=404, detail="Partitura não encontrada. Gere a partitura primeiro.")
+    try:
+        if musicxml_path.stat().st_size == 0:
+            raise HTTPException(status_code=500, detail="MusicXML vazio.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erro ao acessar MusicXML.")
+    return FileResponse(
+        str(musicxml_path),
+        media_type="application/vnd.recordare.musicxml+xml",
+        filename="partitura.musicxml",
     )

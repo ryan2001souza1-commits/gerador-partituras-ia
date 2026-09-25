@@ -531,6 +531,8 @@ document.addEventListener("DOMContentLoaded", () => {
     hideStemsInfo();
     hideTranscribeSection();
     hideTranscriptionInfo();
+    hideScoreSection();
+    lastMusic = null;
   });
 
   // Botão Separar instrumentos
@@ -645,6 +647,251 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // ---- Partitura MusicXML (Etapa 6) ----
+  const scoreSection = document.getElementById("score-section");
+  const scoreInfo = document.getElementById("score-info");
+  const btnScore = document.getElementById("btn-generate-score");
+  const scoreStatus = document.getElementById("score-status");
+  const scoreTempo = document.getElementById("score-tempo");
+  const scoreTimesig = document.getElementById("score-timesig");
+  const scoreQuant = document.getElementById("score-quant");
+  const scoreKeymode = document.getElementById("score-keymode");
+  const scoreKeyHint = document.getElementById("score-key-hint");
+  const scoreWarning = document.getElementById("score-warning");
+  let scorePollingInterval = null;
+  let currentScoreJobId = null;
+  let lastMusic = null;
+
+  function updateScoreStatus(message, type) {
+    if (!scoreStatus) return;
+    scoreStatus.textContent = message;
+    scoreStatus.className = "status visible " + (type || "info");
+    scoreStatus.style.display = "block";
+  }
+
+  function hideScoreSection() {
+    if (scoreSection) scoreSection.classList.add("hidden");
+    if (scoreInfo) scoreInfo.classList.add("hidden");
+    if (scoreStatus) {
+      scoreStatus.textContent = "";
+      scoreStatus.className = "status";
+      scoreStatus.style.display = "none";
+    }
+    if (btnScore) {
+      btnScore.disabled = false;
+      btnScore.textContent = "Gerar partitura MusicXML";
+    }
+    if (scorePollingInterval) {
+      clearInterval(scorePollingInterval);
+      scorePollingInterval = null;
+    }
+    currentScoreJobId = null;
+  }
+
+  function showScoreSection(fileId, music) {
+    currentFileId = fileId;
+    if (music) lastMusic = music;
+    if (!scoreSection) return;
+    // Prefill BPM da Etapa 3 quando válido
+    if (scoreTempo && lastMusic && lastMusic.bpm_rounded) {
+      scoreTempo.value = String(lastMusic.bpm_rounded);
+    } else if (scoreTempo && lastMusic && lastMusic.bpm) {
+      scoreTempo.value = String(Math.round(lastMusic.bpm));
+    }
+    // Aviso de armadura quando confiança baixa
+    if (scoreKeyHint) {
+      const kc = lastMusic ? lastMusic.key_confidence : null;
+      if (kc != null && kc < 0.45) {
+        scoreKeyHint.textContent = "Ton. detectada com baixa confiança; recomendamos Sem armadura ou revisão manual.";
+        scoreKeyHint.classList.remove("hidden");
+      } else {
+        scoreKeyHint.textContent = "";
+        scoreKeyHint.classList.add("hidden");
+      }
+    }
+    scoreSection.classList.remove("hidden");
+    checkExistingScore(fileId);
+  }
+
+  function showScoreResult(fileId, model) {
+    if (!scoreInfo) return;
+    const partsEl = document.getElementById("score-parts");
+    const bpmEl = document.getElementById("score-bpm");
+    const tsEl = document.getElementById("score-timesig-info");
+    const qEl = document.getElementById("score-quant-info");
+    const dlEl = document.getElementById("score-download");
+    if (partsEl) partsEl.textContent = "Vocais, Baixo, Outros";
+    if (bpmEl) bpmEl.textContent = model.tempo != null ? String(model.tempo) : "-";
+    if (tsEl) tsEl.textContent = model.time_signature || "-";
+    if (qEl) qEl.textContent = model.quantization || "-";
+    if (dlEl) {
+      dlEl.href = `/api/score/${encodeURIComponent(fileId)}/musicxml`;
+      dlEl.style.display = "inline-block";
+    }
+    if (scoreWarning) {
+      const warns = model.warnings || [];
+      if (warns.length) {
+        scoreWarning.textContent = warns.join(" ");
+        scoreWarning.classList.remove("hidden");
+      } else {
+        scoreWarning.textContent = "";
+        scoreWarning.classList.add("hidden");
+      }
+    }
+    scoreInfo.classList.remove("hidden");
+  }
+
+  async function checkExistingScore(fileId) {
+    try {
+      const resp = await fetch(`/api/score/${encodeURIComponent(fileId)}`);
+      const data = await resp.json().catch(() => null);
+      if (resp.ok && data && data.available) {
+        showScoreResult(fileId, data);
+        updateScoreStatus("Partitura já gerada.", "success");
+        if (btnScore) {
+          btnScore.textContent = "Regenerar partitura";
+          btnScore.disabled = false;
+        }
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  async function pollScoreJob(jobId) {
+    try {
+      const resp = await fetch(`/api/score/status/${encodeURIComponent(jobId)}`);
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data) {
+        updateScoreStatus("Erro ao consultar status da partitura.", "error");
+        if (btnScore) btnScore.disabled = false;
+        clearInterval(scorePollingInterval);
+        scorePollingInterval = null;
+        return;
+      }
+      const status = data.status;
+      const msg = data.message || status;
+      if (status === "queued" || status === "running") {
+        updateScoreStatus(msg || "Gerando partitura...", "info");
+        if (btnScore) btnScore.disabled = true;
+      } else if (status === "completed") {
+        updateScoreStatus(msg || "Partitura concluída.", "success");
+        if (btnScore) {
+          btnScore.textContent = "Regenerar partitura";
+          btnScore.disabled = false;
+        }
+        clearInterval(scorePollingInterval);
+        scorePollingInterval = null;
+        const model = data.results || data.score;
+        const fid = data.file_id || currentFileId;
+        if (model && fid) showScoreResult(fid, model);
+        else if (fid) checkExistingScore(fid);
+      } else if (status === "failed") {
+        updateScoreStatus(msg || "Não foi possível gerar a partitura.", "error");
+        if (btnScore) btnScore.disabled = false;
+        clearInterval(scorePollingInterval);
+        scorePollingInterval = null;
+      }
+    } catch (e) {
+      updateScoreStatus("Erro ao consultar status da partitura.", "error");
+    }
+  }
+
+  if (btnScore) {
+    btnScore.addEventListener("click", async () => {
+      if (!currentFileId) {
+        updateScoreStatus("Nenhum arquivo analisado.", "error");
+        return;
+      }
+      const tempoVal = scoreTempo && scoreTempo.value ? Number(scoreTempo.value) : null;
+      const payload = {
+        tempo: tempoVal,
+        time_signature: scoreTimesig ? scoreTimesig.value : "4/4",
+        quantization: scoreQuant ? scoreQuant.value : "1/16",
+        key_mode: scoreKeymode ? scoreKeymode.value : "auto",
+      };
+      btnScore.disabled = true;
+      btnScore.textContent = "Gerando partitura...";
+      updateScoreStatus("Preparando partitura...", "info");
+      try {
+        const resp = await fetch(`/api/score/${encodeURIComponent(currentFileId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json().catch(() => null);
+        if (resp.status === 409 || resp.status === 400) {
+          updateScoreStatus((data && data.detail) || "Não foi possível gerar a partitura.", "error");
+          btnScore.disabled = false;
+          btnScore.textContent = "Gerar partitura MusicXML";
+          return;
+        }
+        if (resp.status === 503) {
+          updateScoreStatus("music21 não está instalado.", "error");
+          btnScore.disabled = false;
+          btnScore.textContent = "Gerar partitura MusicXML";
+          return;
+        }
+        if (!resp.ok || !data || !data.job_id) {
+          updateScoreStatus((data && (data.detail || data.message)) || "Não foi possível gerar a partitura.", "error");
+          btnScore.disabled = false;
+          btnScore.textContent = "Gerar partitura MusicXML";
+          return;
+        }
+        if (data.already_completed) {
+          updateScoreStatus("Partitura já gerada.", "success");
+          const model = data.score;
+          if (model) showScoreResult(currentFileId, model);
+          btnScore.textContent = "Regenerar partitura";
+          btnScore.disabled = false;
+          return;
+        }
+        currentScoreJobId = data.job_id;
+        updateScoreStatus(data.message || "Geração agendada.", "info");
+        if (scorePollingInterval) clearInterval(scorePollingInterval);
+        scorePollingInterval = setInterval(() => pollScoreJob(currentScoreJobId), 2000);
+        setTimeout(() => pollScoreJob(currentScoreJobId), 1000);
+      } catch (e) {
+        updateScoreStatus("Erro ao gerar partitura.", "error");
+        btnScore.disabled = false;
+        btnScore.textContent = "Gerar partitura MusicXML";
+      }
+    });
+  }
+
+  // Expõe score section sempre que a transcrição for exibida:
+  const _origShowTranscriptionInfo2 = showTranscriptionInfo;
+  showTranscriptionInfo = function (fileId, data) {
+    _origShowTranscriptionInfo2(fileId, data);
+    fetch(`/api/analyze/${encodeURIComponent(fileId)}`)
+      .then((r) => r.json().catch(() => null))
+      .then((a) => showScoreSection(fileId, a && a.music ? a.music : lastMusic))
+      .catch(() => showScoreSection(fileId, lastMusic));
+  };
+
+  // Guarda última análise musical para prefill de BPM:
+  const _origShowMusicInfo = showMusicInfo;
+  showMusicInfo = function (music, fallbackWarning) {
+    lastMusic = music || lastMusic;
+    _origShowMusicInfo(music, fallbackWarning);
+  };
+
+  // Hook: quando transcrição conclui via polling, mostra score section
+  const _origPollTranscribe = pollTranscribeJob;
+  pollTranscribeJob = async function (jobId) {
+    await _origPollTranscribe(jobId);
+    try {
+      if (!transcribePollingInterval && currentFileId && transcriptionInfo && !transcriptionInfo.classList.contains("hidden")) {
+        if (scoreSection && scoreSection.classList.contains("hidden")) {
+          fetch(`/api/analyze/${encodeURIComponent(currentFileId)}`)
+            .then((r) => r.json().catch(() => null))
+            .then((a) => showScoreSection(currentFileId, a && a.music ? a.music : lastMusic))
+            .catch(() => showScoreSection(currentFileId, lastMusic));
+        }
+      }
+    } catch (e) {}
+  };
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearStatus();
@@ -654,6 +901,8 @@ document.addEventListener("DOMContentLoaded", () => {
     hideStemsInfo();
     hideTranscribeSection();
     hideTranscriptionInfo();
+    hideScoreSection();
+    lastMusic = null;
     currentFileId = null;
 
     const file = fileInput.files[0];

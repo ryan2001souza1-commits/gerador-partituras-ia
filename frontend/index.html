@@ -131,10 +131,62 @@
         </div>
         <p id="transcription-warning" class="music-warning hidden"></p>
       </div>
+
+      <div id="score-section" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Gerar partitura</h3>
+        <p class="hint">Quantização automática + MusicXML editável no MuseScore 4 (Vocais, Baixo, Outros).</p>
+        <div class="info-grid" style="margin-top:12px;">
+          <div class="info-item">
+            <label class="label" for="score-tempo">Andamento (BPM)</label>
+            <input id="score-tempo" type="number" min="30" max="300" step="1" value="89" style="width:100%; padding:8px;" />
+          </div>
+          <div class="info-item">
+            <label class="label" for="score-timesig">Compasso</label>
+            <select id="score-timesig" style="width:100%; padding:8px;">
+              <option value="4/4" selected>4/4</option>
+              <option value="3/4">3/4</option>
+              <option value="6/8">6/8</option>
+            </select>
+          </div>
+          <div class="info-item">
+            <label class="label" for="score-quant">Precisão rítmica</label>
+            <select id="score-quant" style="width:100%; padding:8px;">
+              <option value="1/8">1/8</option>
+              <option value="1/16" selected>1/16</option>
+              <option value="1/32">1/32</option>
+            </select>
+          </div>
+          <div class="info-item">
+            <label class="label" for="score-keymode">Armadura</label>
+            <select id="score-keymode" style="width:100%; padding:8px;">
+              <option value="auto" selected>Automática</option>
+              <option value="none">Sem armadura</option>
+            </select>
+          </div>
+        </div>
+        <p id="score-key-hint" class="music-warning hidden"></p>
+        <button id="btn-generate-score" class="btn" style="background:#0d9488; margin-top:12px;">Gerar partitura MusicXML</button>
+        <div id="score-status" class="status" style="display:none;"></div>
+        <p class="hint" style="margin-top:8px; font-size:0.82rem;">A quantização é automática e pode exigir revisão humana. Tuplets automáticos serão aprimorados futuramente.</p>
+      </div>
+
+      <div id="score-info" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Partitura gerada</h3>
+        <div class="info-grid">
+          <div class="info-item"><span class="info-label">Partes:</span> <span id="score-parts">-</span></div>
+          <div class="info-item"><span class="info-label">BPM:</span> <span id="score-bpm">-</span></div>
+          <div class="info-item"><span class="info-label">Compasso:</span> <span id="score-timesig-info">-</span></div>
+          <div class="info-item"><span class="info-label">Quantização:</span> <span id="score-quant-info">-</span></div>
+        </div>
+        <p style="margin-top:12px;">
+          <a id="score-download" class="btn" style="background:#0d9488; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MusicXML</a>
+        </p>
+        <p id="score-warning" class="music-warning hidden"></p>
+      </div>
     </section>
 
     <footer class="footer">
-      <small>Etapa 5 &mdash; Transcrição para MIDI (vocals, bass, other) com Basic Pitch. Próxima etapa: quantização + MusicXML/MuseScore.</small>
+      <small>Etapa 6 &mdash; Quantização + MusicXML (Vocais, Baixo, Outros) para MuseScore 4. Próxima etapa: arranjo para metais.</small>
     </footer>
   </main>
 

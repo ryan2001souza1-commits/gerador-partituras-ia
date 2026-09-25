@@ -3,6 +3,27 @@
 venv/
 .venv-demucs/
 .venv-basicpitch/
+.venv-notation/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Variáveis de ambiente
+.env
+.env.*
+
+# VS Code
+.vscode/
+
+# Arquivos enviados e gerados
+uploads/
+stems/
+midi/
+transcriptions/
+output/
+scores/
+score_models/
 
 # Python
 __pycache__/

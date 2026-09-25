@@ -91,7 +91,57 @@ Endpoints:
 - `GET /api/midi/{file_id}/{stem}` — MIDI `audio/midi` (vocals/bass/other, drums 400)
 - `GET /api/basic-pitch/info` — Basic Pitch debug
 
+Endpoints Etapa 6:
+
+- `POST /api/score/{file_id}` — agenda partitura `{tempo, time_signature, quantization, key_mode}` (409 sem transcrição, 503 sem music21, 409 se job ativo)
+- `GET /api/score/status/{job_id}` — status `queued|running|completed|failed`
+- `GET /api/score/{file_id}` — modelo `score.json` (tempo, compasso, partes, warnings)
+- `GET /api/score/{file_id}/musicxml` — download `partitura.musicxml`
+- `GET /api/notation/info` — music21 debug
+
 Formatos: `.mp3`, `.wav`, `.flac`, `.m4a`, `.ogg`
+
+## Etapa 6 — Quantização + MusicXML para MuseScore 4
+
+- Transforma `transcriptions/<file_id>/*.json` em partitura quantizada e editável:
+  eventos Basic Pitch → limpeza → grade de tempo (BPM Etapa 3 + beat grid) →
+  quantização (1/8, 1/16, 1/32) → pausas → compassos (4/4, 3/4, 6/8, com ties) →
+  armadura (se confiança ≥ 0.45, com normalização enarmônica) → andamento
+  explícito → 3 partes (Vocais/Baixo/Outros) → `scores/<file_id>/score.musicxml`
+- Worker isolado `backend/workers/notation_worker.py` executado via `.venv-notation`
+  (music21 10.5.0, sem importar no FastAPI principal); modelo intermediário
+  `score_models/<file_id>/score.json` com estatísticas para debugging
+- Vocals/bass monofônicos (overlaps resolvidos por encurtamento, com estatísticas);
+  `other` polifônico (mesmo onset → Chord, ex. C4+E4+G4; voices até 4)
+- Job assíncrono `POST /api/score/{file_id}` → `GET /api/score/status/{job_id}`,
+  `GET /api/score/{file_id}`, `GET /api/score/{file_id}/musicxml`
+  (`application/vnd.recordare.musicxml+xml`, `partitura.musicxml`),
+  `GET /api/notation/info`; idempotência por config key; timeout 5 min
+- Frontend: card “Gerar partitura” após transcrição (BPM editável com default da
+  Etapa 3, compasso, precisão rítmica, armadura Automática/Sem armadura com aviso
+  de baixa confiança), polling, “Baixar MusicXML”, warnings visíveis
+
+> MusicXML abre no MuseScore 4. A quantização é automática e pode exigir revisão
+> humana. Tuplets automáticos serão aprimorados futuramente. Pitch bends do
+> Basic Pitch permanecem no MIDI da Etapa 5 e não são convertidos em microtons
+> na partitura.
+
+## Setup Notation (ambiente separado — protege .venv/.venv-demucs/.venv-basicpitch)
+
+```powershell
+py -3.11 -m venv .venv-notation
+.\.venv-notation\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-notation\Scripts\python.exe -m pip install -r requirements-notation.txt
+# requirements-notation.txt: music21==10.5.0
+.\.venv-notation\Scripts\python.exe -c "import music21; print(music21.__version__)"
+# Esperado: 10.5.0
+```
+
+O backend resolve o Python de notação nesta ordem: `NOTATION_PYTHON` env →
+`.venv-notation/Scripts/python.exe` → `bin/python` → fallback `sys.executable`.
+Beat grid: `get_beat_grid()` em `backend/audio/music_analysis.py` reaproveita o
+pipeline da Etapa 3 (HPSS + onset + beat_track) e fornece `first_beat_time`
+como `beat_offset` interno (fallback 0 com warning; sem downbeat complexo).
 
 ## Arquitetura Etapa 5
 
@@ -103,7 +153,8 @@ Formatos: `.mp3`, `.wav`, `.flac`, `.m4a`, `.ogg`
 
 ## Segurança
 
-- `pathlib` + UUID, sem `shell=True`, `subprocess` lista, timeout (FFprobe 15s, FFmpeg 30s, Demucs 45min, Basic Pitch 20min/stem), sem expor stderr/stack trace
+- `pathlib` + UUID, sem `shell=True`, `subprocess` lista, timeout (FFprobe 15s, FFmpeg 30s, Demucs 45min, Basic Pitch 20min/stem, Notation 5min), sem expor stderr/stack trace
 - Upload chunks 1 MB, limite 100 MB, validação real via FFprobe
 - Stems: `file_id` UUID, `stem_name` allowlist, `resolve().relative_to(STEMS_DIR)`; Transcrições/MIDI: `TRANSCRIBED_STEMS` allowlist, `resolve().relative_to(MIDI_DIR/TRANSCRIPTIONS_DIR)`, nunca `../../` nem filename original
-- Temporários limpos mesmo em exceção/timeout; `stems/`, `midi/`, `transcriptions/`, `.venv-*` ignorados no Git
+- Score: config validada (BPM 30–300, allowlists de compasso/quantização/key_mode), `resolve().relative_to(SCORES_DIR)`, nunca path do cliente, `FileResponse` MusicXML
+- Temporários limpos mesmo em exceção/timeout; `stems/`, `midi/`, `transcriptions/`, `scores/`, `score_models/`, `.venv-*` ignorados no Git
