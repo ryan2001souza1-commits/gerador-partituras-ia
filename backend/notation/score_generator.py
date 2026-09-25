@@ -29,6 +29,7 @@ from backend.notation.score_utils import (
     config_key,
     validate_score_config,
 )
+from backend.musical.cleanup import validate_cleanup_profile
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -184,7 +185,7 @@ def get_music_context(file_id: str) -> Dict[str, Any]:
         ctx["warnings"].append("Áudio original não localizado; beat grid indisponível (offset 0).")
         return ctx
     try:
-        from backend.audio.music_analysis import analyze_music, get_beat_grid
+        from backend.audio.music_analysis import analyze_music, get_beat_grid, estimate_beat_offset
     except Exception as e:
         logger.debug(f"music_analysis indisponível: {e}")
         return ctx
@@ -201,10 +202,46 @@ def get_music_context(file_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"analyze_music falhou p/ score ctx: {e}")
         ctx["warnings"].append("Análise musical indisponível para defaults.")
+    # Início das primeiras notas transcritas (refino do offset, Etapa 7).
+    earliest_note: Optional[float] = None
+    try:
+        from backend.audio.transcriber import TRANSCRIPTIONS_DIR
+        starts: List[float] = []
+        for stem in ("vocals", "bass", "other"):
+            p = TRANSCRIPTIONS_DIR / file_id / f"{stem}.json"
+            if not p.is_file():
+                continue
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for ev in data.get("events", []) or []:
+                try:
+                    starts.append(float(ev["start"]))
+                except (TypeError, ValueError, KeyError):
+                    continue
+        if starts:
+            earliest_note = min(s for s in starts if s >= 0)
+            ctx["earliest_note_time"] = earliest_note
+    except Exception as e:
+        logger.debug(f"earliest_note falhou: {e}")
     try:
         grid = get_beat_grid(Path(upload_path))
-        if grid and grid.get("first_beat_time") is not None:
-            ctx["beat_offset"] = float(grid["first_beat_time"])
+        first_beat = grid.get("first_beat_time") if grid else None
+        ctx["first_beat_time"] = first_beat
+        if first_beat is not None and ctx.get("tempo"):
+            # Back-projection (Etapa 7): offset normalizado p/ dentro de 1 beat.
+            ctx["beat_offset"] = float(estimate_beat_offset(
+                first_beat, ctx["tempo"],
+                beat_times=(grid.get("beat_times") if grid else None),
+                earliest_note_time=earliest_note,
+            ))
+            ctx["beat_grid"] = True
+            if first_beat >= (60.0 / float(ctx["tempo"])):
+                ctx["warnings"].append(
+                    f"Primeiro beat confiável em {first_beat:.2f}s; "
+                    f"grade projetada para trás (offset {ctx['beat_offset']:.3f}s)."
+                )
+        elif first_beat is not None:
+            ctx["beat_offset"] = float(first_beat)
             ctx["beat_grid"] = True
         else:
             ctx["warnings"].append("Beat grid indisponível; usando beat_offset=0.")
@@ -258,6 +295,7 @@ def _build_worker_command(
     beat_offset: float,
     output_musicxml: Path,
     output_model: Path,
+    cleanup_profile: str = "natural",
 ) -> List[str]:
     from backend.audio.transcriber import TRANSCRIPTIONS_DIR
     cmd = [
@@ -272,6 +310,7 @@ def _build_worker_command(
         "--quantization", quantization,
         "--key-mode", key_mode,
         "--beat-offset", str(beat_offset),
+        "--cleanup-profile", cleanup_profile,
     ]
     if key:
         cmd.extend(["--key", str(key)])
@@ -323,16 +362,18 @@ async def generate_score_async(
     time_signature: str = DEFAULT_TIME_SIGNATURE,
     quantization: str = DEFAULT_QUANTIZATION,
     key_mode: str = DEFAULT_KEY_MODE,
+    cleanup_profile: str = "natural",
     timeout: int = NOTATION_TIMEOUT,
 ) -> Dict[str, Any]:
     """Gera score.musicxml + score.json. Retorna model dict.
 
-    - Valida config (30-300 BPM, allowlists).
+    - Valida config (30-300 BPM, allowlists, perfil natural/detailed).
     - Se tempo None: usa BPM da Etapa 3; fallback 120 com warning.
     - Idempotência: se score.json existe com mesma config key, reutiliza.
     """
     if not _validate_file_id(file_id):
         raise ValueError("file_id inválido.")
+    profile = validate_cleanup_profile(cleanup_profile)
     ok, missing = are_transcriptions_ready(file_id)
     if not ok:
         raise FileNotFoundError(f"Transcreva os instrumentos antes de gerar a partitura. Faltando: {missing}")
@@ -369,7 +410,8 @@ async def generate_score_async(
     beat_offset = float(ctx.get("beat_offset") or 0.0)
 
     musicxml_path, model_path = get_score_paths(file_id)
-    ck = config_key(tempo_val, time_signature, quantization, key_mode)
+    ck = config_key(tempo_val, time_signature, quantization, key_mode,
+                    cleanup_profile=profile)
 
     # Idempotência: mesma config -> reutiliza sem reexecutar worker
     if model_path.is_file() and musicxml_path.is_file():
@@ -403,7 +445,7 @@ async def generate_score_async(
 
     cmd = _build_worker_command(
         py, file_id, int(tempo_val), time_signature, quantization, key_mode,
-        key, mode, key_conf, beat_offset, musicxml_path, model_path,
+        key, mode, key_conf, beat_offset, musicxml_path, model_path, profile,
     )
     rc, stdout, stderr = await _run_notation_async(cmd, timeout=timeout)
     if rc != 0:

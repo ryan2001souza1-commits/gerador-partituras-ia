@@ -137,12 +137,14 @@ def validate_score_config(
     }
 
 
-def config_key(tempo: Any, time_signature: str, quantization: str, key_mode: str) -> str:
+def config_key(tempo: Any, time_signature: str, quantization: str, key_mode: str,
+               cleanup_profile: str = "natural") -> str:
     """Chave determinística da configuração (idempotência / regen).
 
     Mesmo config -> mesma chave; config diferente -> chave diferente.
+    Inclui o perfil de limpeza (natural x detailed mudam o resultado).
     """
-    raw = f"{tempo}|{time_signature}|{quantization}|{key_mode}"
+    raw = f"{tempo}|{time_signature}|{quantization}|{key_mode}|{cleanup_profile}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 

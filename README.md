@@ -142,6 +142,49 @@ O backend resolve o Python de notação nesta ordem: `NOTATION_PYTHON` env →
 Beat grid: `get_beat_grid()` em `backend/audio/music_analysis.py` reaproveita o
 pipeline da Etapa 3 (HPSS + onset + beat_track) e fornece `first_beat_time`
 como `beat_offset` interno (fallback 0 com warning; sem downbeat complexo).
+Etapa 7: `estimate_beat_offset()` projeta a grade para trás
+(`first_beat_time mod beat_period`, sempre em `[0, período)`), evitando
+clamping em massa quando o primeiro beat confiável aparece tarde.
+
+## Etapa 7 — Refinamento rítmico + sopros transpositores + arranjo automático
+
+- Beat offset refinado por back-projection (BPM 89 inalterado); warning se >15%
+  das notas forem clampadas ao beat 0.
+- Instrumentos (concert pitch interno, `written = concert + T`): Sax Alto Eb (+9),
+  Sax Tenor Bb (+14), Trompete Bb (+2), Trombone C (+0), Clarinete Bb (+2);
+  ranges absolutos/preferidos conservadores, octave shift ±12 com contadores.
+- Arranjo determinístico (sem LLM/API): melodia de vocals (ou voz superior de
+  other), simplified por default, respiros a cada 16 beats, harmonias por chord
+  tones de other com voice leading por custo (uníssono/2ª/cruzamento penalizados),
+  fallback 8ª→5ª→pausa; distribuição automatic por quantidade (1 melodia,
+  2 melodia+harmonia, 3 melodia+2 harmonias, 4+ com voz grave).
+- Worker `backend/workers/arrangement_worker.py` (.venv-notation reutilizado);
+  `arrangements/<file_id>/arrangement.musicxml` + `arrangement.json`;
+  partes originais opcionais (`include_original_parts`, default true);
+  `<transpose>` + armadura escrita por parte validados por reparse.
+- Endpoints: `GET /api/arrangement/info`, `POST /api/arrange/{file_id}`
+  (409 sem base, allowlist, máx 5), `GET /api/arrange/status/{job_id}`,
+  `GET /api/arrangement/{file_id}`, `GET /api/arrangement/{file_id}/musicxml`
+  (`arranjo.musicxml`); idempotência por config key; timeout 5 min.
+- Frontend: card “Criar arranjo” após partitura (checkboxes, modo Automático/
+  Melodia/Harmonia, incluir originais), resultado por instrumento + download.
+
+> O arranjo automático pode exigir revisão humana. Sem bateria nesta etapa.
+
+## Etapa 7.2 — Refinamento musical do Natural (sem novos instrumentos)
+
+- Mesmo perfil `natural` (default), mais musical: quantização adaptativa que
+  preserva semicolcheias reais e alinha jitter; triagem MERGE/PRESERVAR/REMOVER
+  (fantasma curta+fraca+distante sai, passagem por graus fica); smoothing de
+  oitava com ganho mínimo; outliers conservadores; monofonia com vencedor por
+  duração×força; acordes de `other` com voicing (baixo+terça/quinta+topo, teto 4);
+  harmonia com janela de 2 beats + pesos (baixo/downbeat) + memória com margem
+  8 + duração mínima 1 beat + reset por frase + cadência estável;
+  sopros em bloco (grade 1 beat), sustain over retrigger (gap ≤0.25),
+  crossing com correção de oitava, register lock, alvo de clutter (máx 2 passes).
+- Métricas: `clutter_score` (menor melhor) e `naturalness_score` (maior melhor),
+  só debug/testes. Caso real (89 BPM, Tpt+Alto+Tbn): harmonias 22/15→9 notas
+  XML com média ~2.4 beats; naturalness dos sopros detailed −74 → natural −6.
 
 ## Arquitetura Etapa 5
 
@@ -153,7 +196,7 @@ como `beat_offset` interno (fallback 0 com warning; sem downbeat complexo).
 
 ## Segurança
 
-- `pathlib` + UUID, sem `shell=True`, `subprocess` lista, timeout (FFprobe 15s, FFmpeg 30s, Demucs 45min, Basic Pitch 20min/stem, Notation 5min), sem expor stderr/stack trace
+- `pathlib` + UUID, sem `shell=True`, `subprocess` lista, timeout (FFprobe 15s, FFmpeg 30s, Demucs 45min, Basic Pitch 20min/stem, Notation 5min, Arrange 5min), sem expor stderr/stack trace
 - Upload chunks 1 MB, limite 100 MB, validação real via FFprobe
 - Stems: `file_id` UUID, `stem_name` allowlist, `resolve().relative_to(STEMS_DIR)`; Transcrições/MIDI: `TRANSCRIBED_STEMS` allowlist, `resolve().relative_to(MIDI_DIR/TRANSCRIPTIONS_DIR)`, nunca `../../` nem filename original
 - Score: config validada (BPM 30–300, allowlists de compasso/quantização/key_mode), `resolve().relative_to(SCORES_DIR)`, nunca path do cliente, `FileResponse` MusicXML

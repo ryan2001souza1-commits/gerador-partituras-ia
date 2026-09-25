@@ -24,6 +24,7 @@ transcriptions/
 output/
 scores/
 score_models/
+arrangements/
 
 # Python
 __pycache__/

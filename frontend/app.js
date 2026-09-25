@@ -656,6 +656,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const scoreTimesig = document.getElementById("score-timesig");
   const scoreQuant = document.getElementById("score-quant");
   const scoreKeymode = document.getElementById("score-keymode");
+  const scoreCleanup = document.getElementById("score-cleanup");
   const scoreKeyHint = document.getElementById("score-key-hint");
   const scoreWarning = document.getElementById("score-warning");
   let scorePollingInterval = null;
@@ -686,6 +687,7 @@ document.addEventListener("DOMContentLoaded", () => {
       scorePollingInterval = null;
     }
     currentScoreJobId = null;
+    hideArrangeSection();
   }
 
   function showScoreSection(fileId, music) {
@@ -739,6 +741,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
     scoreInfo.classList.remove("hidden");
+    showArrangeSection(fileId);
   }
 
   async function checkExistingScore(fileId) {
@@ -797,6 +800,205 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // ---- Arranjo para sopros (Etapa 7) ----
+  const arrangeSection = document.getElementById("arrange-section");
+  const arrangeInfo = document.getElementById("arrange-info");
+  const btnArrange = document.getElementById("btn-arrange");
+  const arrangeStatus = document.getElementById("arrange-status");
+  const arrangeMode = document.getElementById("arrange-mode");
+  const arrangeCleanup = document.getElementById("arrange-cleanup");
+  const arrangeInclude = document.getElementById("arrange-include-originals");
+  const arrangeWarning = document.getElementById("arrange-warning");
+  let arrangePollingInterval = null;
+  let currentArrangeJobId = null;
+
+  function updateArrangeStatus(message, type) {
+    if (!arrangeStatus) return;
+    arrangeStatus.textContent = message;
+    arrangeStatus.className = "status visible " + (type || "info");
+    arrangeStatus.style.display = "block";
+  }
+
+  function hideArrangeSection() {
+    if (arrangeSection) arrangeSection.classList.add("hidden");
+    if (arrangeInfo) arrangeInfo.classList.add("hidden");
+    if (arrangeStatus) {
+      arrangeStatus.textContent = "";
+      arrangeStatus.className = "status";
+      arrangeStatus.style.display = "none";
+    }
+    if (btnArrange) {
+      btnArrange.disabled = false;
+      btnArrange.textContent = "Criar arranjo";
+    }
+    if (arrangePollingInterval) {
+      clearInterval(arrangePollingInterval);
+      arrangePollingInterval = null;
+    }
+    currentArrangeJobId = null;
+  }
+
+  function showArrangeSection(fileId) {
+    currentFileId = fileId;
+    if (!arrangeSection) return;
+    arrangeSection.classList.remove("hidden");
+    checkExistingArrangement(fileId);
+  }
+
+  function showArrangeResult(fileId, model) {
+    if (!arrangeInfo) return;
+    const grid = document.getElementById("arrange-result-grid");
+    const dlEl = document.getElementById("arrange-download");
+    if (grid) {
+      grid.innerHTML = "";
+      (model.instruments || []).forEach((inst) => {
+        const div = document.createElement("div");
+        div.className = "info-item";
+        const label = document.createElement("span");
+        label.className = "info-label";
+        label.textContent = `${inst.name} — ${inst.role}:`;
+        const val = document.createElement("span");
+        val.textContent = ` ${inst.notes_count} notas`;
+        div.appendChild(label);
+        div.appendChild(val);
+        grid.appendChild(div);
+      });
+    }
+    if (dlEl) {
+      dlEl.href = `/api/arrangement/${encodeURIComponent(fileId)}/musicxml`;
+      dlEl.style.display = "inline-block";
+    }
+    if (arrangeWarning) {
+      const warns = model.warnings || [];
+      if (warns.length) {
+        arrangeWarning.textContent = warns.join(" ");
+        arrangeWarning.classList.remove("hidden");
+      } else {
+        arrangeWarning.textContent = "";
+        arrangeWarning.classList.add("hidden");
+      }
+    }
+    arrangeInfo.classList.remove("hidden");
+  }
+
+  async function checkExistingArrangement(fileId) {
+    try {
+      const resp = await fetch(`/api/arrangement/${encodeURIComponent(fileId)}`);
+      const data = await resp.json().catch(() => null);
+      if (resp.ok && data && data.available) {
+        showArrangeResult(fileId, data);
+        updateArrangeStatus("Arranjo já gerado.", "success");
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  async function pollArrangeJob(jobId) {
+    try {
+      const resp = await fetch(`/api/arrange/status/${encodeURIComponent(jobId)}`);
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data) {
+        updateArrangeStatus("Erro ao consultar status do arranjo.", "error");
+        if (btnArrange) btnArrange.disabled = false;
+        clearInterval(arrangePollingInterval);
+        arrangePollingInterval = null;
+        return;
+      }
+      const status = data.status;
+      const msg = data.message || status;
+      if (status === "queued" || status === "running") {
+        updateArrangeStatus(msg || "Gerando arranjo...", "info");
+        if (btnArrange) btnArrange.disabled = true;
+      } else if (status === "completed") {
+        updateArrangeStatus(msg || "Arranjo concluído.", "success");
+        if (btnArrange) {
+          btnArrange.textContent = "Recriar arranjo";
+          btnArrange.disabled = false;
+        }
+        clearInterval(arrangePollingInterval);
+        arrangePollingInterval = null;
+        const model = data.results || data.arrangement;
+        const fid = data.file_id || currentFileId;
+        if (model && fid) showArrangeResult(fid, model);
+        else if (fid) checkExistingArrangement(fid);
+      } else if (status === "failed") {
+        updateArrangeStatus(msg || "Não foi possível gerar o arranjo.", "error");
+        if (btnArrange) btnArrange.disabled = false;
+        clearInterval(arrangePollingInterval);
+        arrangePollingInterval = null;
+      }
+    } catch (e) {
+      updateArrangeStatus("Erro ao consultar status do arranjo.", "error");
+    }
+  }
+
+  if (btnArrange) {
+    btnArrange.addEventListener("click", async () => {
+      if (!currentFileId) {
+        updateArrangeStatus("Nenhum arquivo analisado.", "error");
+        return;
+      }
+      const boxes = document.querySelectorAll("#arrange-instruments input[type=checkbox]:checked");
+      const selected = Array.from(boxes).map((b) => b.value);
+      if (!selected.length) {
+        updateArrangeStatus("Selecione ao menos 1 instrumento.", "error");
+        return;
+      }
+      const payload = {
+        instruments: selected,
+        mode: arrangeMode ? arrangeMode.value : "automatic",
+        include_original_parts: arrangeInclude ? arrangeInclude.checked : true,
+        cleanup_profile: arrangeCleanup ? arrangeCleanup.value : "natural",
+      };
+      btnArrange.disabled = true;
+      btnArrange.textContent = "Criando arranjo...";
+      updateArrangeStatus("Analisando melodia...", "info");
+      try {
+        const resp = await fetch(`/api/arrange/${encodeURIComponent(currentFileId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json().catch(() => null);
+        if (resp.status === 409 || resp.status === 400) {
+          updateArrangeStatus((data && data.detail) || "Não foi possível gerar o arranjo.", "error");
+          btnArrange.disabled = false;
+          btnArrange.textContent = "Criar arranjo";
+          return;
+        }
+        if (resp.status === 503) {
+          updateArrangeStatus("music21 não está instalado.", "error");
+          btnArrange.disabled = false;
+          btnArrange.textContent = "Criar arranjo";
+          return;
+        }
+        if (!resp.ok || !data || !data.job_id) {
+          updateArrangeStatus((data && (data.detail || data.message)) || "Não foi possível gerar o arranjo.", "error");
+          btnArrange.disabled = false;
+          btnArrange.textContent = "Criar arranjo";
+          return;
+        }
+        if (data.already_completed) {
+          updateArrangeStatus("Arranjo já gerado.", "success");
+          if (data.arrangement) showArrangeResult(currentFileId, data.arrangement);
+          btnArrange.textContent = "Recriar arranjo";
+          btnArrange.disabled = false;
+          return;
+        }
+        currentArrangeJobId = data.job_id;
+        updateArrangeStatus(data.message || "Arranjo agendado.", "info");
+        if (arrangePollingInterval) clearInterval(arrangePollingInterval);
+        arrangePollingInterval = setInterval(() => pollArrangeJob(currentArrangeJobId), 2000);
+        setTimeout(() => pollArrangeJob(currentArrangeJobId), 1000);
+      } catch (e) {
+        updateArrangeStatus("Erro ao gerar arranjo.", "error");
+        btnArrange.disabled = false;
+        btnArrange.textContent = "Criar arranjo";
+      }
+    });
+  }
+
   if (btnScore) {
     btnScore.addEventListener("click", async () => {
       if (!currentFileId) {
@@ -809,6 +1011,7 @@ document.addEventListener("DOMContentLoaded", () => {
         time_signature: scoreTimesig ? scoreTimesig.value : "4/4",
         quantization: scoreQuant ? scoreQuant.value : "1/16",
         key_mode: scoreKeymode ? scoreKeymode.value : "auto",
+        cleanup_profile: scoreCleanup ? scoreCleanup.value : "natural",
       };
       btnScore.disabled = true;
       btnScore.textContent = "Gerando partitura...";

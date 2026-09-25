@@ -51,6 +51,23 @@ from backend.notation.score_utils import (  # noqa: E402
 )
 
 
+from backend.musical.cleanup import (  # noqa: E402
+    MAX_CHORD_NATURAL,
+    PREFER_CHORD_NATURAL,
+    adaptive_quantize,
+    event_strength,
+    reduce_chord_voicing,
+    refine_other_accompaniment,
+    remove_outliers,
+    resolve_mono_natural,
+    simplify_chord,
+    smooth_melody,
+    triage_short_notes,
+    trio_voicing,
+    validate_cleanup_profile,
+)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Notation worker (music21)")
     p.add_argument("--file-id", required=True)
@@ -65,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mode", default=None)
     p.add_argument("--key-confidence", default=None, type=float)
     p.add_argument("--beat-offset", default=0.0, type=float)
+    p.add_argument("--cleanup-profile", default="detailed")
     return p.parse_args()
 
 
@@ -78,15 +96,8 @@ def load_events(trans_dir: Path, stem: str) -> dict:
     return {"events": events}
 
 
-def process_monophonic(
-    events: list, tempo: float, beat_offset: float, grid: float
-) -> tuple[list, dict]:
-    """Limpeza -> beats -> merge -> quantização -> overlaps. Retorna (notes, stats)."""
-    stats: dict = {}
-    raw = len(events)
-    cleaned, clean_stats = clean_events(events)
-    stats.update({f"clean_{k}": v for k, v in clean_stats.items()})
-
+def _to_beats(cleaned: list, tempo: float, beat_offset: float, grid: float):
+    """Eventos limpos -> beats (carrega strength p/ triagem)."""
     notes_beats: list = []
     pickups = 0
     for ev in cleaned:
@@ -102,21 +113,59 @@ def process_monophonic(
             "start": sb, "end": eb,
             "pitch": int(ev["pitch"]),
             "velocity": int(ev.get("velocity", 64)),
+            "strength": event_strength(ev),
         })
+    return notes_beats, pickups
+
+
+def _blank_part_stats() -> dict:
+    return {"short_notes_merged": 0, "short_notes_removed": 0,
+            "octave_corrections": 0, "outliers_removed": 0,
+            "chords_simplified": 0, "duplicate_octaves_removed": 0,
+            "rhythmic_simplifications": 0, "sustains_merged": 0}
+
+
+def process_monophonic(
+    events: list, tempo: float, beat_offset: float, grid: float,
+    profile: str = "detailed", smooth: bool = False,
+) -> tuple[list, dict]:
+    """Limpeza -> beats -> merge -> [triagem+smooth+outliers] ->
+    quantização (adaptativa no natural) -> overlaps. Retorna (notes, stats)."""
+    stats: dict = {}
+    stats.update(_blank_part_stats())
+    raw = len(events)
+    cleaned, clean_stats = clean_events(events)
+    stats.update({f"clean_{k}": v for k, v in clean_stats.items()})
+
+    notes_beats, pickups = _to_beats(cleaned, tempo, beat_offset, grid)
     stats["pickups_clamped"] = pickups
 
     merged, merged_count = merge_same_pitch(notes_beats)
     stats["merged"] = merged_count
+    stats["sustains_merged"] = merged_count
 
-    quantized: list = []
-    for n in merged:
-        qs, qe = quantize_note(n["start"], n["end"], grid)
-        quantized.append({
-            "start": qs, "end": qe,
-            "pitch": int(n["pitch"]),
-            "velocity": int(n.get("velocity", 64)),
-        })
-    resolved, ov_stats = resolve_monophonic_overlaps(quantized, grid)
+    if profile == "natural":
+        merged, tri = triage_short_notes(merged, grid, profile)
+        stats["short_notes_merged"] += tri["short_notes_merged"]
+        stats["short_notes_removed"] += tri["short_notes_removed"]
+        if smooth:
+            merged, smo = smooth_melody(merged, profile)
+            stats["octave_corrections"] += smo["octave_corrections"]
+        merged, out = remove_outliers(merged, profile)
+        stats["outliers_removed"] += out["outliers_removed"]
+        quantized, aq = adaptive_quantize(merged, grid, profile)
+        stats["rhythmic_simplifications"] += aq["rhythmic_simplifications"]
+        resolved, ov_stats = resolve_mono_natural(quantized, grid)
+    else:
+        quantized: list = []
+        for n in merged:
+            qs, qe = quantize_note(n["start"], n["end"], grid)
+            quantized.append({
+                "start": qs, "end": qe,
+                "pitch": int(n["pitch"]),
+                "velocity": int(n.get("velocity", 64)),
+            })
+        resolved, ov_stats = resolve_monophonic_overlaps(quantized, grid)
     stats.update(ov_stats)
     stats["raw"] = raw
     stats["cleaned"] = len(cleaned)
@@ -125,49 +174,60 @@ def process_monophonic(
 
 
 def process_other(
-    events: list, tempo: float, beat_offset: float, grid: float
+    events: list, tempo: float, beat_offset: float, grid: float,
+    profile: str = "detailed", bass_notes: Optional[list] = None,
 ) -> tuple[list, list, dict]:
-    """Retorna (items chord/note, voices assignment, stats)."""
+    """Retorna (items chord/note, voices assignment, stats).
+
+    Natural: `items` (fonte harmônica dos sopros) preserva todo o conteúdo;
+    as voices são montadas sobre cópias refinadas (trio + hold + duração
+    mínima + registro + voice leading). Detailed: idêntico à Etapa 6/7.
+    """
     stats: dict = {}
+    stats.update(_blank_part_stats())
     raw = len(events)
     cleaned, clean_stats = clean_events(events)
     stats.update({f"clean_{k}": v for k, v in clean_stats.items()})
 
-    notes_beats: list = []
-    pickups = 0
-    for ev in cleaned:
-        start = float(ev["start"])
-        end = float(ev["end"])
-        if start < beat_offset:
-            pickups += 1
-        sb = seconds_to_beats(start, tempo, beat_offset)
-        eb = seconds_to_beats(end, tempo, beat_offset)
-        if eb <= sb:
-            eb = sb + grid
-        notes_beats.append({
-            "start": sb, "end": eb,
-            "pitch": int(ev["pitch"]),
-            "velocity": int(ev.get("velocity", 64)),
-        })
+    notes_beats, pickups = _to_beats(cleaned, tempo, beat_offset, grid)
     stats["pickups_clamped"] = pickups
 
     merged, merged_count = merge_same_pitch(notes_beats)
     stats["merged"] = merged_count
+    stats["sustains_merged"] = merged_count
 
-    quantized: list = []
-    for n in merged:
-        qs, qe = quantize_note(n["start"], n["end"], grid)
-        quantized.append({
-            "start": qs, "end": qe,
-            "pitch": int(n["pitch"]),
-            "velocity": int(n.get("velocity", 64)),
-        })
+    if profile == "natural":
+        merged, tri = triage_short_notes(merged, grid, profile)
+        stats["short_notes_merged"] += tri["short_notes_merged"]
+        stats["short_notes_removed"] += tri["short_notes_removed"]
+        merged, out = remove_outliers(merged, profile)
+        stats["outliers_removed"] += out["outliers_removed"]
+        quantized, aq = adaptive_quantize(merged, grid, profile)
+        stats["rhythmic_simplifications"] += aq["rhythmic_simplifications"]
+    else:
+        quantized: list = []
+        for n in merged:
+            qs, qe = quantize_note(n["start"], n["end"], grid)
+            quantized.append({
+                "start": qs, "end": qe,
+                "pitch": int(n["pitch"]),
+                "velocity": int(n.get("velocity", 64)),
+            })
     items, chord_stats = group_chords_other(quantized)
     stats.update(chord_stats)
+    write_items = items
+    if profile == "natural":
+        # Acompanhamento limpo só para ESCRITA; `items` segue intacto p/ sopros.
+        write_items, ref = refine_other_accompaniment(
+            items, profile, bass_notes=bass_notes)
+        stats.update(ref)
+        if write_items is items:
+            write_items = [dict(it, pitches=list(it.get("pitches", [])))
+                           for it in items]
 
     # Distribui itens em voices monofônicas (greedy, determinístico).
     voices: list[list] = []
-    for item in sorted(items, key=lambda i: (i["start"], i["end"])):
+    for item in sorted(write_items, key=lambda i: (float(i["start"]), float(i["end"]))):
         placed = False
         for voice in voices:
             if float(item["start"]) >= float(voice[-1]["end"]) - 1e-9:
@@ -178,10 +238,38 @@ def process_other(
             if len(voices) < 4:
                 voices.append([item])
             else:
-                # Estratégia determinística: anexa à voice com fim mais antigo.
-                voices.sort(key=lambda v: v[-1]["end"])
-                voices[0].append(item)
-                stats["voice_overflow"] = stats.get("voice_overflow", 0) + 1
+                # Overflow: primeiro tenta unir ao item de MESMO onset em
+                # alguma voice (vira acorde, monofonia preservada).
+                merged = False
+                for voice in voices:
+                    for cand in voice:
+                        if abs(float(cand["start"]) - float(item["start"])) < 1e-9 \
+                                and float(cand["end"]) > float(item["start"]) + 1e-9:
+                            pitches = list(cand["pitches"]) + list(item["pitches"])
+                            pitches = sorted(set(int(p) for p in pitches))
+                            if profile == "natural" and len(pitches) > 3:
+                                pitches, _cap = trio_voicing(pitches, None, set())
+                            cand["pitches"] = pitches
+                            if len(cand["pitches"]) > 1:
+                                cand["kind"] = "chord"
+                            try:
+                                cand["velocity"] = max(int(cand.get("velocity", 0)),
+                                                       int(item.get("velocity", 0)))
+                            except (TypeError, ValueError):
+                                pass
+                            # Mantém end original (não estende: evita criar
+                            # overlap novo dentro da voice).
+                            merged = True
+                            stats["overflow_merged"] = stats.get("overflow_merged", 0) + 1
+                            break
+                    if merged:
+                        break
+                if not merged:
+                    # Estratégia determinística final: anexa à voice com fim
+                    # mais antigo (pode gerar overlap; coberto por warning).
+                    voices.sort(key=lambda v: v[-1]["end"])
+                    voices[0].append(item)
+                    stats["voice_overflow"] = stats.get("voice_overflow", 0) + 1
     stats["voices"] = len(voices)
     stats["raw"] = raw
     stats["cleaned"] = len(cleaned)
@@ -478,6 +566,7 @@ def validate_musicxml(musicxml_path: Path) -> dict:
 def main() -> None:
     args = parse_args()
     warnings: list = []
+    profile = validate_cleanup_profile(getattr(args, "cleanup_profile", "detailed"))
 
     tempo = float(args.tempo)
     grid = grid_step_beats(args.quantization)
@@ -501,11 +590,13 @@ def main() -> None:
     }
 
     vocals_notes, vocals_stats = process_monophonic(
-        vocals_data["events"], tempo, beat_offset, grid)
+        vocals_data["events"], tempo, beat_offset, grid,
+        profile=profile, smooth=True)
     bass_notes, bass_stats = process_monophonic(
-        bass_data["events"], tempo, beat_offset, grid)
+        bass_data["events"], tempo, beat_offset, grid, profile=profile)
     other_items, other_voices, other_stats = process_other(
-        other_data["events"], tempo, beat_offset, grid)
+        other_data["events"], tempo, beat_offset, grid, profile=profile,
+        bass_notes=bass_notes if profile == "natural" else None)
 
     other_pitches = [int(ev["pitch"]) for ev in other_data["events"]
                      if isinstance(ev.get("pitch"), (int, float))]
@@ -516,11 +607,33 @@ def main() -> None:
             f"{vocals_stats['pickups_clamped']} nota(s) de vocais antes do beat 0; "
             "leading rest adicionado (anacruse simplificada)."
         )
+    # Etapa 7: se fração relevante foi clampada, avisar (ideal: quase nenhuma).
+    total_clamped = (
+        int(vocals_stats.get("pickups_clamped", 0))
+        + int(bass_stats.get("pickups_clamped", 0))
+        + int(other_stats.get("pickups_clamped", 0))
+    )
+    total_cleaned = (
+        int(vocals_stats.get("cleaned", 0))
+        + int(bass_stats.get("cleaned", 0))
+        + int(other_stats.get("cleaned", 0))
+    )
+    if total_cleaned > 0 and total_clamped / total_cleaned > 0.15:
+        pct = round(100.0 * total_clamped / total_cleaned, 1)
+        warnings.append(
+            f"{pct}% das notas ({total_clamped}) começaram antes do beat_offset "
+            f"e foram alinhadas ao beat 0; verifique o alinhamento inicial."
+        )
     if other_stats.get("voice_overflow"):
         warnings.append(
             f"Polifonia de `other` excedeu {4} vozes em "
             f"{other_stats['voice_overflow']} trecho(s); estratégia determinística aplicada. "
             "Tuplets automáticos serão aprimorados futuramente."
+        )
+    if other_stats.get("overflow_merged"):
+        warnings.append(
+            f"{other_stats['overflow_merged']} nota(s) de `other` fundida(s) em acorde "
+            f"de mesmo onset (polifonia > 4 vozes simultâneas)."
         )
     if bass_stats.get("large_overlaps") or vocals_stats.get("large_overlaps"):
         warnings.append("Overlaps grandes resolvidos por encurtamento; revisar musicalmente.")
@@ -572,11 +685,37 @@ def main() -> None:
     def _rep(name: str, field: str) -> int:
         return int(reparsed_counts.get(name, {}).get(field, 0))
 
+    def _part_stats(stem: str, pname: str, st: dict, extra: dict) -> dict:
+        d = {
+            "raw_notes": raw_counts[stem],
+            "cleaned_notes": st.get("cleaned", 0),
+            "raw_events": raw_counts[stem],
+            "cleaned_events": st.get("cleaned", 0),
+            "quantized_events": st.get("quantized", 0),
+            "merged_notes": st.get("merged", 0),
+            "short_notes_merged": st.get("short_notes_merged", 0),
+            "short_notes_removed": st.get("short_notes_removed", 0),
+            "octave_corrections": st.get("octave_corrections", 0),
+            "outliers_removed": st.get("outliers_removed", 0),
+            "chords_simplified": st.get("chords_simplified", 0),
+            "duplicate_octaves_removed": st.get("duplicate_octaves_removed", 0),
+            "rhythmic_simplifications": st.get("rhythmic_simplifications", 0),
+            "sustains_merged": st.get("sustains_merged", 0),
+            "written_notes": written_counts[stem]["notes"],
+            "written_chords": written_counts[stem]["chords"],
+            "reparsed_notes": _rep(pname, "notes"),
+            "reparsed_chords": _rep(pname, "chords"),
+        }
+        d.update(extra)
+        return d
+
+    tempo_norm = int(tempo) if float(tempo).is_integer() else tempo
     model = {
         "file_id": args.file_id,
-        "tempo": int(tempo) if float(tempo).is_integer() else tempo,
+        "tempo": tempo_norm,
         "time_signature": args.time_signature,
         "quantization": args.quantization,
+        "cleanup_profile": profile,
         "key_mode": args.key_mode,
         "key": key_norm,
         "mode": mode_norm,
@@ -584,54 +723,33 @@ def main() -> None:
         "key_warning": key_warning,
         "beat_offset": beat_offset,
         "config_key": config_key(
-            int(tempo) if float(tempo).is_integer() else tempo,
-            args.time_signature, args.quantization, args.key_mode),
+            tempo_norm, args.time_signature, args.quantization, args.key_mode,
+            cleanup_profile=profile),
         "parts": {
-            "vocals": {
-                "raw_events": raw_counts["vocals"],
-                "cleaned_events": vocals_stats.get("cleaned", 0),
-                "quantized_events": vocals_stats.get("quantized", 0),
-                "merged_notes": vocals_stats.get("merged", 0),
-                "voices": 1,
-                "chords": 0,
-                "voice_overflow": 0,
-                "duplicate_pitches_removed": 0,
-                "written_notes": written_counts["vocals"]["notes"],
-                "written_chords": written_counts["vocals"]["chords"],
-                "reparsed_notes": _rep("Vocais", "notes"),
-                "reparsed_chords": _rep("Vocais", "chords"),
-                "clef": "treble",
-            },
-            "bass": {
-                "raw_events": raw_counts["bass"],
-                "cleaned_events": bass_stats.get("cleaned", 0),
-                "quantized_events": bass_stats.get("quantized", 0),
-                "merged_notes": bass_stats.get("merged", 0),
-                "voices": 1,
-                "chords": 0,
-                "voice_overflow": 0,
-                "duplicate_pitches_removed": 0,
-                "written_notes": written_counts["bass"]["notes"],
-                "written_chords": written_counts["bass"]["chords"],
-                "reparsed_notes": _rep("Baixo", "notes"),
-                "reparsed_chords": _rep("Baixo", "chords"),
-                "clef": "bass",
-            },
-            "other": {
-                "raw_events": raw_counts["other"],
-                "cleaned_events": other_stats.get("cleaned", 0),
-                "quantized_events": other_stats.get("quantized", 0),
-                "merged_notes": other_stats.get("merged", 0),
+            "vocals": _part_stats("vocals", "Vocais", vocals_stats, {
+                "voices": 1, "chords": 0, "voice_overflow": 0,
+                "duplicate_pitches_removed": 0, "clef": "treble"}),
+            "bass": _part_stats("bass", "Baixo", bass_stats, {
+                "voices": 1, "chords": 0, "voice_overflow": 0,
+                "duplicate_pitches_removed": 0, "clef": "bass"}),
+            "other": _part_stats("other", "Outros", other_stats, {
                 "voices": other_stats.get("voices", 0),
                 "chords": other_stats.get("chords", 0),
                 "voice_overflow": other_stats.get("voice_overflow", 0),
+                "overflow_merged": other_stats.get("overflow_merged", 0),
                 "duplicate_pitches_removed": other_stats.get("duplicate_pitches_removed", 0),
-                "written_notes": written_counts["other"]["notes"],
-                "written_chords": written_counts["other"]["chords"],
-                "reparsed_notes": _rep("Outros", "notes"),
-                "reparsed_chords": _rep("Outros", "chords"),
-                "clef": other_clef,
-            },
+                "raw_polyphony_max": other_stats.get("raw_polyphony_max", 0),
+                "final_polyphony_max": other_stats.get("final_polyphony_max", 0),
+                "raw_chord_count": other_stats.get("raw_chord_count", 0),
+                "final_chord_count": other_stats.get("final_chord_count", 0),
+                "cluster_events_removed": other_stats.get("cluster_events_removed", 0),
+                "duplicate_pitch_classes_removed": other_stats.get(
+                    "duplicate_pitch_classes_removed", 0),
+                "harmony_rearticulations_removed": other_stats.get(
+                    "harmony_rearticulations_removed", 0),
+                "average_chord_duration": other_stats.get("average_chord_duration", 0.0),
+                "average_voice_movement": other_stats.get("average_voice_movement", 0.0),
+                "clef": other_clef}),
         },
         "measures": validation.get("measures"),
         "notes": validation.get("notes"),

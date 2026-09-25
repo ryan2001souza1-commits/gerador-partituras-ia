@@ -519,6 +519,9 @@ def _stage_score_copy() -> str:
     shutil.copyfile(s["xml"], xml_p)
     model = dict(s["model"])
     model["file_id"] = fid
+    # Chave no formato atual (perfil natural default da API).
+    model["config_key"] = config_key(120, "4/4", "1/16", "none")
+    model["cleanup_profile"] = "natural"
     with open(model_p, "w", encoding="utf-8") as f:
         json.dump(model, f, ensure_ascii=False, indent=2)
     trans_target = TRANSCRIPTIONS_DIR / fid
@@ -570,6 +573,7 @@ def test_39_idempotency_config_regen():
     assert config_key(89, "4/4", "1/16", "auto") == k1
     assert config_key(90, "4/4", "1/16", "auto") != k1
     assert config_key(89, "3/4", "1/16", "auto") != k1
+    assert config_key(89, "4/4", "1/16", "auto", cleanup_profile="detailed") != k1
     # API: score existente + mesma config -> already_completed
     from app import app
     client = TestClient(app)

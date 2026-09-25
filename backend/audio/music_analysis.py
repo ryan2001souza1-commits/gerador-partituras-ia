@@ -784,3 +784,70 @@ def get_beat_grid(input_path: Path) -> Dict[str, Any]:
             except Exception:
                 pass
 
+
+# ---------------------------------------------------------------------------
+# Refinamento do beat_offset — Etapa 7 (não altera o BPM)
+# ---------------------------------------------------------------------------
+
+def estimate_beat_offset(
+    first_beat_time: Any,
+    bpm: Any,
+    beat_times: Optional[List[float]] = None,
+    earliest_note_time: Optional[float] = None,
+) -> float:
+    """Projeta a grade rítmica para trás (back-projection) até próximo de 0.
+
+    Se o beat tracker só encontra pulso confiável tarde (ex. 4.09s), usar
+    `first_beat_time` como offset comprime tudo que veio antes no beat 0
+    (na Etapa 6 isso gerou um acorde artificial gigante em `other`).
+    Como o BPM é conhecido, a fase da grade é periódica:
+
+        beat_offset = first_beat_time mod beat_period,  beat_period = 60/BPM
+
+    com 0 <= offset < beat_period (salvo fallback documentado 0.0).
+
+    Parâmetros:
+    - first_beat_time: primeiro beat confiável (s) ou None;
+    - bpm: andamento da Etapa 3 (NÃO é alterado aqui);
+    - beat_times: lista completa (opcional); se first_beat_time for None,
+      usa beat_times[0] como fallback;
+    - earliest_note_time: início da primeira nota transcrita (opcional,
+      informativo — a fase é determinada pela back-projection; o volume de
+      notas anteriores ao offset é medido pelo worker e gera warning se
+      exceder o limite documentado).
+
+    Retorna offset em segundos, sempre em [0, beat_period), ou 0.0 em
+    fallback (BPM/beat ausente ou inválido).
+    """
+    try:
+        b = float(bpm)
+    except (TypeError, ValueError):
+        return 0.0
+    if not (b > 0) or not bool(np.isfinite(b)):
+        return 0.0
+    period = 60.0 / b
+
+    fb: Optional[float] = None
+    try:
+        if first_beat_time is not None:
+            fb = float(first_beat_time)
+    except (TypeError, ValueError):
+        fb = None
+    if (fb is None or not (fb > 0)) and beat_times:
+        try:
+            cands = [float(t) for t in beat_times if float(t) > 0]
+            fb = min(cands) if cands else None
+        except (TypeError, ValueError):
+            fb = None
+    if fb is None or not (fb > 0) or not bool(np.isfinite(fb)):
+        return 0.0
+    # Back-projection: fase equivalente dentro de um período.
+    off = fb % period
+    # Poeira de ponto flutuante próxima ao período -> 0.
+    if period - off < 1e-3:
+        off = 0.0
+    off = round(max(0.0, min(off, period)), 6)
+    if off >= period:
+        off = 0.0
+    return off
+

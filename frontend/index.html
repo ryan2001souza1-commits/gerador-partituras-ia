@@ -163,11 +163,18 @@
               <option value="none">Sem armadura</option>
             </select>
           </div>
+          <div class="info-item">
+            <label class="label" for="score-cleanup">Estilo de transcrição</label>
+            <select id="score-cleanup" style="width:100%; padding:8px;">
+              <option value="natural" selected>Natural</option>
+              <option value="detailed">Detalhado</option>
+            </select>
+          </div>
         </div>
         <p id="score-key-hint" class="music-warning hidden"></p>
         <button id="btn-generate-score" class="btn" style="background:#0d9488; margin-top:12px;">Gerar partitura MusicXML</button>
         <div id="score-status" class="status" style="display:none;"></div>
-        <p class="hint" style="margin-top:8px; font-size:0.82rem;">A quantização é automática e pode exigir revisão humana. Tuplets automáticos serão aprimorados futuramente.</p>
+        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Natural: prioriza linhas mais limpas, notas sustentadas e harmonia estável. Detalhado: preserva mais detalhes da transcrição.</p>
       </div>
 
       <div id="score-info" class="audio-info hidden" aria-live="polite">
@@ -183,10 +190,52 @@
         </p>
         <p id="score-warning" class="music-warning hidden"></p>
       </div>
+
+      <div id="arrange-section" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Criar arranjo</h3>
+        <p class="hint">Arranjo determinístico para sopros (dobra de melodia + harmonias por regras).</p>
+        <div class="info-grid" style="margin-top:12px;" id="arrange-instruments">
+          <label class="info-item"><input type="checkbox" value="alto_sax" /> Sax Alto em Eb</label>
+          <label class="info-item"><input type="checkbox" value="tenor_sax" /> Sax Tenor em Bb</label>
+          <label class="info-item"><input type="checkbox" value="trumpet" /> Trompete em Bb</label>
+          <label class="info-item"><input type="checkbox" value="trombone" /> Trombone</label>
+          <label class="info-item"><input type="checkbox" value="clarinet" /> Clarinete em Bb</label>
+          <div class="info-item">
+            <label class="label" for="arrange-mode">Modo</label>
+            <select id="arrange-mode" style="width:100%; padding:8px;">
+              <option value="automatic" selected>Automático</option>
+              <option value="melody">Melodia</option>
+              <option value="harmony">Harmonia</option>
+            </select>
+          </div>
+          <div class="info-item">
+            <label class="label" for="arrange-cleanup">Estilo de transcrição</label>
+            <select id="arrange-cleanup" style="width:100%; padding:8px;">
+              <option value="natural" selected>Natural</option>
+              <option value="detailed">Detalhado</option>
+            </select>
+          </div>
+        </div>
+        <p style="margin-top:8px;">
+          <label><input type="checkbox" id="arrange-include-originals" checked /> Incluir Vocais/Baixo/Outros</label>
+        </p>
+        <button id="btn-arrange" class="btn" style="background:#7c3aed; margin-top:12px;">Criar arranjo</button>
+        <div id="arrange-status" class="status" style="display:none;"></div>
+        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Natural: prioriza linhas mais limpas, notas sustentadas e harmonia estável. Detalhado: preserva mais detalhes da transcrição.</p>
+      </div>
+
+      <div id="arrange-info" class="audio-info hidden" aria-live="polite">
+        <h3 class="info-title">Arranjo concluído</h3>
+        <div class="info-grid" id="arrange-result-grid"></div>
+        <p style="margin-top:12px;">
+          <a id="arrange-download" class="btn" style="background:#7c3aed; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MusicXML do arranjo</a>
+        </p>
+        <p id="arrange-warning" class="music-warning hidden"></p>
+      </div>
     </section>
 
     <footer class="footer">
-      <small>Etapa 6 &mdash; Quantização + MusicXML (Vocais, Baixo, Outros) para MuseScore 4. Próxima etapa: arranjo para metais.</small>
+      <small>Etapa 7 &mdash; Arranjo para sopros (Sax Alto/Tenor, Trompete, Trombone, Clarinete) + MusicXML. O arranjo automático pode exigir revisão humana.</small>
     </footer>
   </main>
 

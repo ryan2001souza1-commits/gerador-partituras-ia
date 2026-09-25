@@ -99,6 +99,35 @@ from backend.notation.score_utils import (
     validate_score_config,
 )
 
+from backend.musical.cleanup import (
+    CLEANUP_PROFILES,
+    validate_cleanup_profile,
+)
+
+from backend.arrangement.arrangement_generator import (
+    ARRANGE_TIMEOUT,
+    arrangement_config_key,
+    generate_arrangement_async,
+    get_arrangement_info,
+    get_arrangement_paths,
+    instruments_info,
+    read_base_score,
+    validate_arrange_config,
+)
+
+from backend.arrangement.arrangement_job_manager import (
+    create_arrangement_job,
+    get_arrangement_job,
+    update_arrangement_job,
+    has_active_arrangement_job,
+    arrangement_job_to_dict,
+    get_active_arrangement_job,
+)
+
+from backend.arrangement.instrument_definitions import (
+    SUPPORTED_ARRANGE_MODES,
+)
+
 # ---------------------------------------------------------------------------
 # Configuração centralizada
 # ---------------------------------------------------------------------------
@@ -1028,6 +1057,7 @@ async def _run_score_job(job_id: str, file_id: str, config: dict):
             time_signature=config.get("time_signature", "4/4"),
             quantization=config.get("quantization", "1/16"),
             key_mode=config.get("key_mode", "auto"),
+            cleanup_profile=config.get("cleanup_profile", "natural"),
             timeout=NOTATION_TIMEOUT,
         )
 
@@ -1081,6 +1111,7 @@ def notation_info():
             "supported_time_signatures": list(SUPPORTED_TIME_SIGNATURES),
             "supported_quantization": list(SUPPORTED_QUANTIZATIONS),
             "supported_key_modes": list(SUPPORTED_KEY_MODES),
+            "supported_cleanup_profiles": list(CLEANUP_PROFILES),
             "timeout_seconds": int(NOTATION_TIMEOUT),
         },
     )
@@ -1088,7 +1119,7 @@ def notation_info():
 
 @app.post("/api/score/{file_id}")
 async def create_score(file_id: str, payload: Optional[dict] = None):
-    """Agenda geração de MusicXML. Body: {tempo, time_signature, quantization, key_mode}."""
+    """Agenda geração de MusicXML. Body: {tempo, time_signature, quantization, key_mode, cleanup_profile}."""
     try:
         uuid.UUID(file_id)
     except ValueError:
@@ -1100,6 +1131,10 @@ async def create_score(file_id: str, payload: Optional[dict] = None):
     time_signature = body.get("time_signature", "4/4")
     quantization = body.get("quantization", "1/16")
     key_mode = body.get("key_mode", "auto")
+    try:
+        cleanup_profile = validate_cleanup_profile(body.get("cleanup_profile", "natural"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Validação estrita (tempo None = resolver depois)
     try:
@@ -1128,14 +1163,16 @@ async def create_score(file_id: str, payload: Optional[dict] = None):
                 norm_tempo = int(round(t)) if float(t).is_integer() else round(t, 2)
             from backend.notation.score_utils import config_key as _ck
             if norm_tempo is not None and existing.get("tempo") == norm_tempo:
-                ck = _ck(norm_tempo, time_signature, quantization, key_mode)
+                ck = _ck(norm_tempo, time_signature, quantization, key_mode,
+                         cleanup_profile=cleanup_profile)
                 if existing.get("config_key") == ck:
                     job = create_notation_job(file_id, status="completed", message="Partitura já gerada.")
                     job.already_completed = True
                     update_notation_job(
                         job.job_id, status="completed", message="Partitura já gerada.",
                         config={"tempo": norm_tempo, "time_signature": time_signature,
-                                "quantization": quantization, "key_mode": key_mode},
+                                "quantization": quantization, "key_mode": key_mode,
+                                "cleanup_profile": cleanup_profile},
                         results=existing, already_completed=True,
                     )
                     return JSONResponse(status_code=200, content={
@@ -1169,6 +1206,7 @@ async def create_score(file_id: str, payload: Optional[dict] = None):
         "time_signature": time_signature,
         "quantization": quantization,
         "key_mode": key_mode,
+        "cleanup_profile": cleanup_profile,
     }
     job = create_notation_job(file_id, status="queued", message="Preparando partitura...", config=config)
     update_notation_job(job.job_id, message="Preparando partitura...")
@@ -1242,4 +1280,210 @@ def download_musicxml(file_id: str):
         str(musicxml_path),
         media_type="application/vnd.recordare.musicxml+xml",
         filename="partitura.musicxml",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Arranjo para sopros — Etapa 7 (jobs e endpoints)
+# ---------------------------------------------------------------------------
+
+async def _run_arrange_job(job_id: str, file_id: str, config: dict):
+    """Executa arranjo em background com progresso honesto."""
+    try:
+        update_arrangement_job(job_id, status="running", message="Analisando melodia...")
+        logger.info(f"Arrange job {job_id} running file_id={file_id} config={config}")
+        await asyncio.sleep(0.1)
+        update_arrangement_job(job_id, message="Analisando harmonia...")
+        await asyncio.sleep(0.1)
+
+        model = await generate_arrangement_async(
+            file_id,
+            instruments=config.get("instruments", []),
+            mode=config.get("mode", "automatic"),
+            include_original_parts=config.get("include_original_parts", True),
+            cleanup_profile=config.get("cleanup_profile", "natural"),
+            timeout=ARRANGE_TIMEOUT,
+        )
+
+        update_arrangement_job(job_id, message="Distribuindo instrumentos...")
+        await asyncio.sleep(0.1)
+        update_arrangement_job(job_id, message="Ajustando tessituras...")
+        await asyncio.sleep(0.1)
+        update_arrangement_job(job_id, message="Aplicando transposições...")
+        await asyncio.sleep(0.1)
+        update_arrangement_job(job_id, message="Gerando MusicXML...")
+        await asyncio.sleep(0.1)
+        update_arrangement_job(job_id, message="Validando arranjo...")
+
+        update_arrangement_job(job_id, status="completed",
+                               message="Arranjo concluído.", results=model)
+        logger.info(f"Arrange job {job_id} completed file_id={file_id}")
+    except FileNotFoundError as e:
+        msg = str(e)
+        friendly = "Gere a partitura base antes de criar o arranjo."
+        logger.error(f"Arrange job {job_id} failed file_id={file_id}: {e}")
+        update_arrangement_job(job_id, status="failed", message=friendly, error=msg)
+    except ValueError as e:
+        update_arrangement_job(job_id, status="failed", message=str(e), error=str(e))
+    except TimeoutError as e:
+        update_arrangement_job(job_id, status="failed",
+                               message="O arranjo demorou mais que o esperado.", error=str(e))
+    except RuntimeError as e:
+        msg = str(e)
+        friendly = "Não foi possível gerar o arranjo."
+        if "music21" in msg.lower() or "notação" in msg.lower():
+            friendly = "music21 não está instalado. Configure .venv-notation com music21==10.5.0"
+        update_arrangement_job(job_id, status="failed", message=friendly, error=msg)
+    except Exception as e:
+        logger.error(f"Arrange job {job_id} erro inesperado file_id={file_id}: {e}", exc_info=True)
+        update_arrangement_job(job_id, status="failed",
+                               message="Não foi possível gerar o arranjo.", error=str(e))
+
+
+@app.get("/api/arrangement/info")
+def arrangement_info():
+    return JSONResponse(status_code=200, content={
+        "success": True,
+        "instruments": instruments_info(),
+        "supported_modes": list(SUPPORTED_ARRANGE_MODES),
+        "supported_cleanup_profiles": list(CLEANUP_PROFILES),
+        "max_instruments": 5,
+        "timeout_seconds": int(ARRANGE_TIMEOUT),
+    })
+
+
+@app.post("/api/arrange/{file_id}")
+async def create_arrangement(file_id: str, payload: Optional[dict] = None):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    body = payload or {}
+    try:
+        cleanup_profile = validate_cleanup_profile(body.get("cleanup_profile", "natural"))
+        cfg = validate_arrange_config(
+            body.get("instruments", []),
+            body.get("mode", "automatic"),
+            body.get("include_original_parts", True),
+        )
+        cfg["cleanup_profile"] = cleanup_profile
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    base = read_base_score(file_id)
+    if not base:
+        raise HTTPException(
+            status_code=409, detail="Gere a partitura base antes de criar o arranjo.")
+
+    # Idempotência: mesmo arranjo sobre a mesma base -> already_completed.
+    try:
+        existing = get_arrangement_info(file_id)
+        if existing and existing.get("available") and existing.get("musicxml_available"):
+            ck = arrangement_config_key(cfg["instruments"], cfg["mode"],
+                                        cfg["include_original_parts"],
+                                        cleanup_profile=cfg["cleanup_profile"])
+            if existing.get("config_key") == ck \
+                    and existing.get("base_config_key") == str(base.get("config_key", "")):
+                job = create_arrangement_job(file_id, status="completed",
+                                             message="Arranjo já gerado.")
+                job.already_completed = True
+                update_arrangement_job(job.job_id, status="completed",
+                                       message="Arranjo já gerado.", config=cfg,
+                                       results=existing, already_completed=True)
+                return JSONResponse(status_code=200, content={
+                    "success": True, "job_id": job.job_id, "file_id": file_id,
+                    "status": "completed", "already_completed": True,
+                    "message": "Arranjo já gerado.", "arrangement": existing,
+                })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.debug(f"Idempotência arrange falhou, segue: {e}")
+
+    from backend.notation.score_generator import is_notation_available as _na
+    if not _na():
+        raise HTTPException(
+            status_code=503,
+            detail="music21 não está instalado. Configure .venv-notation com music21==10.5.0")
+
+    if has_active_arrangement_job():
+        active = get_active_arrangement_job()
+        logger.warning(f"Arrange já em andamento job={active.job_id if active else 'unknown'}")
+        raise HTTPException(status_code=409,
+                            detail="Já existe um arranjo em andamento. Aguarde concluir.")
+
+    job = create_arrangement_job(file_id, status="queued",
+                                 message="Analisando melodia...", config=cfg)
+    asyncio.create_task(_run_arrange_job(job.job_id, file_id, cfg))
+    return JSONResponse(status_code=200, content={
+        "success": True, "job_id": job.job_id, "file_id": file_id,
+        "status": "queued", "already_completed": False,
+        "message": "Arranjo agendado.", "config": cfg,
+    })
+
+
+@app.get("/api/arrange/status/{job_id}")
+def get_arrange_status(job_id: str):
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_id inválido.")
+    job = get_arrangement_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404,
+                            detail="Job não encontrado. Reiniciar servidor perde jobs em memória.")
+    data = arrangement_job_to_dict(job)
+    if job.status == "completed" and job.file_id:
+        info = get_arrangement_info(job.file_id)
+        if info and info.get("available"):
+            data["arrangement"] = info
+            if not data.get("results"):
+                data["results"] = info
+    return JSONResponse(status_code=200, content={"success": True, **data})
+
+
+@app.get("/api/arrangement/{file_id}")
+def read_arrangement(file_id: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    info = get_arrangement_info(file_id)
+    if not info:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    if not info.get("available"):
+        raise HTTPException(status_code=404,
+                            detail="Arranjo não encontrado. Crie o arranjo primeiro.")
+    return JSONResponse(status_code=200, content={"success": True, **info})
+
+
+@app.get("/api/arrangement/{file_id}/musicxml")
+def download_arrangement(file_id: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    musicxml_path, _ = get_arrangement_paths(file_id)
+    try:
+        base = musicxml_path.parents[1].resolve()
+        if musicxml_path.exists():
+            musicxml_path.resolve().relative_to(base)
+        else:
+            musicxml_path.parent.resolve().relative_to(base)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Caminho inválido.")
+    if not musicxml_path.is_file():
+        raise HTTPException(status_code=404,
+                            detail="Arranjo não encontrado. Crie o arranjo primeiro.")
+    try:
+        if musicxml_path.stat().st_size == 0:
+            raise HTTPException(status_code=500, detail="MusicXML vazio.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erro ao acessar MusicXML.")
+    return FileResponse(
+        str(musicxml_path),
+        media_type="application/vnd.recordare.musicxml+xml",
+        filename="arranjo.musicxml",
     )
