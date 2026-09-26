@@ -41,6 +41,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 MIDI_DIR = BASE_DIR / "midi"
 TRANSCRIPTIONS_DIR = BASE_DIR / "transcriptions"
 WORKER_PATH = BASE_DIR / "backend" / "workers" / "basic_pitch_worker.py"
+CHUNKED_WORKER_PATH = BASE_DIR / "backend" / "workers" / "basic_pitch_worker_chunked.py"
 
 # Garante diretórios
 MIDI_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,6 +49,12 @@ TRANSCRIPTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Timeout por stem: 20 minutos (1200s) — centralizado
 BASIC_PITCH_TIMEOUT = 20 * 60
+
+# Etapa 8.2 — chunking para músicas longas
+# Threshold: acima disso, usa pipeline de chunks (fast path preservado abaixo)
+from backend.audio.chunking import CHUNK_DURATION, CHUNK_OVERLAP, create_chunks, is_long_audio
+from backend.audio.long_audio import compute_audio_hash, compute_timeout
+CHUNK_THRESHOLD = float(os.getenv("CHUNK_THRESHOLD", "90"))
 
 # Configuração de frequência por stem (conservadora, validada com testes)
 # None = sem filtro (faixa ampla)
@@ -498,8 +505,133 @@ async def _run_basic_pitch_async(
         raise
 
 # ---------------------------------------------------------------------------
-# Transcrição de um stem
+# Etapa 8.2 — Transcrição chunked para músicas longas
 # ---------------------------------------------------------------------------
+
+def _get_stem_duration_ffprobe(stem_path: Path) -> Optional[float]:
+    """Duração do stem via FFprobe sem carregar áudio em RAM."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             str(stem_path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        out = (r.stdout or "").strip()
+        if out:
+            return float(out.splitlines()[0])
+    except Exception as e:
+        logger.debug(f"ffprobe duration falhou para {stem_path}: {e}")
+    return None
+
+
+def _build_chunked_manifest(
+    stem_path: Path,
+    midi_p: Path,
+    json_p: Path,
+    stem: str,
+    file_id: str,
+    duration: float,
+) -> Tuple[Path, Path]:
+    """Cria manifest JSON para o worker chunked. Retorna (manifest_path, cache_dir).
+
+    O manifest é arquivo temporário UUID — nunca JSON gigante pela CLI.
+    """
+    audio_hash = compute_audio_hash(stem_path) or ""
+    chunks = create_chunks(duration, chunk_duration=CHUNK_DURATION,
+                           overlap=CHUNK_OVERLAP)
+
+    freq_config = STEM_FREQ_RANGES.get(stem, {})
+    predict_kwargs = {
+        "onset_threshold": BASIC_PITCH_DEFAULTS["onset_threshold"],
+        "frame_threshold": BASIC_PITCH_DEFAULTS["frame_threshold"],
+        "minimum_note_length": BASIC_PITCH_DEFAULTS["minimum_note_length"],
+        "midi_tempo": BASIC_PITCH_DEFAULTS["midi_tempo"],
+        "multiple_pitch_bends": BASIC_PITCH_DEFAULTS["multiple_pitch_bends"],
+        "melodia_trick": BASIC_PITCH_DEFAULTS["melodia_trick"],
+    }
+    if freq_config.get("minimum_frequency") is not None:
+        predict_kwargs["minimum_frequency"] = freq_config["minimum_frequency"]
+    if freq_config.get("maximum_frequency") is not None:
+        predict_kwargs["maximum_frequency"] = freq_config["maximum_frequency"]
+
+    cache_dir = TRANSCRIPTIONS_DIR / file_id / "chunks" / stem
+
+    # Chunks em formato simples (spec item 4): start/end diretos
+    manifest = {
+        "input": str(stem_path.resolve()),
+        "output_midi": str(midi_p.resolve()),
+        "output_json": str(json_p.resolve()),
+        "cache_dir": str(cache_dir.resolve()),
+        "duration": duration,
+        "audio_hash": audio_hash,
+        "stem": stem,
+        "file_id": file_id,
+        "chunks": [
+            {
+                "index": c.index,
+                "start": c.start_seconds,
+                "end": c.end_seconds,
+                "overlap_before": c.overlap_before,
+                "overlap_after": c.overlap_after,
+            }
+            for c in chunks
+        ],
+        "predict_kwargs": predict_kwargs,
+    }
+
+    # Manifest temporário com UUID (não usa nome do cliente)
+    manifest_dir = TRANSCRIPTIONS_DIR / file_id / "chunks" / stem
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_dir / f"manifest_{uuid.uuid4().hex[:8]}.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    return manifest_path, cache_dir
+
+
+def _run_chunked_basic_pitch_sync(
+    manifest_path: Path,
+    stem: str,
+    timeout: int,
+) -> Tuple[int, str, str]:
+    """Executa worker chunked via subprocess (modelo carregado 1x no worker)."""
+    py = get_basic_pitch_python()
+    if not py or not Path(py).is_file():
+        raise RuntimeError("Python Basic Pitch não encontrado")
+    if not CHUNKED_WORKER_PATH.is_file():
+        raise RuntimeError(f"Worker chunked não encontrado: {CHUNKED_WORKER_PATH}")
+
+    cmd = [
+        str(Path(py).resolve()),
+        str(CHUNKED_WORKER_PATH.resolve()),
+        "--manifest", str(Path(manifest_path).resolve()),
+    ]
+    cwd = str(BASE_DIR.resolve())
+    logger.info(f"Basic Pitch CHUNKED stem={stem} cmd_dir={cwd}")
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=cwd, timeout=timeout,
+        )
+        rc = result.returncode
+        out = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
+        err = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+        logger.info(f"Basic Pitch CHUNKED rc={rc} stem={stem} "
+                    f"stdout_tail={repr(out[-400:])} stderr_tail={repr(err[-400:])}")
+        return rc, out, err
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"Basic Pitch chunked timeout após {timeout}s ({stem})") from e
+    except FileNotFoundError as e:
+        raise RuntimeError("Basic Pitch não está instalado") from e
+
+
+async def _run_chunked_basic_pitch_async(
+    manifest_path: Path, stem: str, timeout: int,
+) -> Tuple[int, str, str]:
+    return await asyncio.to_thread(
+        _run_chunked_basic_pitch_sync, manifest_path, stem, timeout)
+
 
 async def transcribe_stem_async(
     stem_path: Path,
@@ -557,7 +689,34 @@ async def transcribe_stem_async(
             except:
                 pass
 
-    rc, stdout, stderr = await _run_basic_pitch_async(stem_path, midi_p, json_p, stem, file_id, timeout=timeout)
+    # Etapa 8.2: fast path (curto) vs long path (chunked)
+    stem_duration = _get_stem_duration_ffprobe(stem_path)
+    use_chunked = (stem_duration is not None
+                   and is_long_audio(stem_duration, threshold=CHUNK_THRESHOLD))
+
+    if use_chunked:
+        # LONG PATH — pipeline de chunks com cache/progresso (Etapa 8.2)
+        logger.info(f"Transcrição CHUNKED para {stem} file_id={file_id} "
+                    f"duration={stem_duration:.1f}s")
+        manifest_path, cache_dir = _build_chunked_manifest(
+            stem_path, midi_p, json_p, stem, file_id, stem_duration)
+        # Timeout adaptativo para música longa (item 115 da 8.1)
+        chunked_timeout = compute_timeout(stem_duration)
+        try:
+            rc, stdout, stderr = await _run_chunked_basic_pitch_async(
+                manifest_path, stem, timeout=chunked_timeout)
+        finally:
+            # Manifest é temporário; cache_dir permanece para resume
+            try:
+                manifest_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    else:
+        # FAST PATH — worker original, comportamento validado (Etapa 5)
+        if stem_duration is not None:
+            logger.info(f"Transcrição FAST PATH para {stem} file_id={file_id} "
+                        f"duration={stem_duration:.1f}s (<= {CHUNK_THRESHOLD}s)")
+        rc, stdout, stderr = await _run_basic_pitch_async(stem_path, midi_p, json_p, stem, file_id, timeout=timeout)
 
     if rc != 0:
         logger.error(f"Basic Pitch falhou rc={rc} stem={stem} file_id={file_id} stderr[:500]={stderr[:500]}")

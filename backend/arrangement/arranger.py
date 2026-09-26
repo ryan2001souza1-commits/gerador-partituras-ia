@@ -575,6 +575,7 @@ def arrange(
     simplify: bool = True,
     profile: str = "detailed",
     bass_notes: Optional[List[Dict[str, Any]]] = None,
+    style_params: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Any]]:
     """Gera linhas em concert pitch por instrumento + estatísticas.
 
@@ -582,8 +583,13 @@ def arrange(
     ritmo em bloco com 3+ sopros, respiração por prioridades, correção de
     cruzamentos, alvo de clutter, métricas antes/depois por instrumento.
     Detailed: comportamento Etapa 7.
+    style_params (Etapa 8): {"breath_mult": 1.0, "harm_min_dur_mult": 1.0};
+    ausente/neutro = comportamento 7.2.1 idêntico.
     Retorna (lines_por_inst_id, report). Linhas: [{start,end,pitch,velocity}].
     """
+    sp = style_params or {}
+    breath_mult = float(sp.get("breath_mult", 1.0))
+    harm_mult = float(sp.get("harm_min_dur_mult", 1.0))
     report: Dict[str, Any] = {"roles": {}, "stats": {}, "warnings": []}
     if simplify:
         melody_use, simp = simplify_melody(melody)
@@ -604,7 +610,7 @@ def arrange(
         if role == "melody":
             if profile == "natural":
                 merged_mel, mg = merge_adjacent_harmony_notes(melody_use)
-                line, bst = apply_breathing_v2(merged_mel)
+                line, bst = apply_breathing_v2(merged_mel, max_phrase=16.0 * breath_mult)
             else:
                 line, bst = apply_breathing(melody_use)
             fitted_line, adj = _fit_line(line, definition)
@@ -630,14 +636,14 @@ def arrange(
                 bass_notes=bass_notes)
             before = line_stats(hline)
             if profile == "natural":
-                min_dur = 1.0  # máscara rítmica: sax e trombone sem micro-eventos
+                min_dur = 1.0 * harm_mult  # máscara rítmica: sax e trombone sem micro-eventos
                 hline, red = reduce_harmony_rhythm(hline, min_dur=min_dur)
                 hst["rhythmic_simplifications"] = red["rhythmic_simplifications"]
                 hline, sus = sustain_merge(hline)
                 hst["sustains_merged"] = sus
                 hline, mg = merge_adjacent_harmony_notes(hline)
                 hst["sustains_merged"] += mg
-                bline, bst = apply_breathing_v2(hline)
+                bline, bst = apply_breathing_v2(hline, max_phrase=16.0 * breath_mult)
             else:
                 bline, bst = apply_breathing(hline)
             after = line_stats(bline)

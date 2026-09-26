@@ -58,6 +58,32 @@ def create_notation_job(
     return job
 
 
+def create_notation_job_exclusive(
+    file_id: str,
+    status: str = "queued",
+    message: str = "Preparando partitura...",
+    config: Optional[Dict] = None,
+) -> Optional[NotationJob]:
+    """Cria job APENAS se não houver outro ativo (atomic check-and-create)."""
+    with _LOCK:
+        for j in _JOBS.values():
+            if j.status in ("queued", "running"):
+                return None
+        job_id = str(uuid.uuid4())
+        now = _now_iso()
+        job = NotationJob(
+            job_id=job_id,
+            file_id=file_id,
+            status=status,
+            message=message,
+            created_at=now,
+            updated_at=now,
+            config=config,
+        )
+        _JOBS[job_id] = job
+        return job
+
+
 def get_notation_job(job_id: str) -> Optional[NotationJob]:
     with _LOCK:
         return _JOBS.get(job_id)

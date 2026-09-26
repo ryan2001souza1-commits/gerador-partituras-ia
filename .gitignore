@@ -25,7 +25,8 @@ output/
 scores/
 score_models/
 arrangements/
-
+/drums/
+analysis/
 # Python
 __pycache__/
 *.py[cod]

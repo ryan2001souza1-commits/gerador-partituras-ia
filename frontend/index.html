@@ -4,241 +4,334 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Gerador de Partituras IA</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=2" />
 </head>
 <body>
-  <main class="container">
-    <header class="header">
-      <h1>Gerador de Partituras IA</h1>
-      <p class="description">
-        Envie um arquivo de áudio e gere partituras editáveis para o MuseScore 4.
-        Analise BPM, tonalidade, instrumentos e crie arranjos automaticamente.
-      </p>
-    </header>
+  <!-- Linhas de pauta decorativas -->
+  <div class="staff-lines" aria-hidden="true">
+    <span></span><span></span><span></span><span></span><span></span>
+  </div>
 
-    <section class="card">
-      <form id="upload-form" novalidate>
-        <label for="file-input" class="label">Selecione o arquivo de música</label>
-        <input
-          type="file"
-          id="file-input"
-          name="file"
-          accept=".mp3,.wav,.flac,.m4a,.ogg"
-        />
-        <p class="hint">
-          Formatos aceitos: <strong>.mp3</strong>, <strong>.wav</strong>, <strong>.flac</strong>, <strong>.m4a</strong>, <strong>.ogg</strong>
-          &middot; Tamanho máximo: <strong>100 MB</strong>
-        </p>
+  <!-- HEADER -->
+  <header class="site-header">
+    <div class="header-inner">
+      <a href="#" class="logo">
+        <span class="logo-icon">&#9835;</span>
+        Gerador de Partituras IA
+      </a>
+      <button class="nav-toggle" id="nav-toggle" aria-label="Abrir menu">&#9776;</button>
+      <nav class="main-nav" id="main-nav">
+        <a href="#" class="active">Início</a>
+        <a href="#pipeline">Recursos</a>
+        <a href="#resultado">Como funciona</a>
+        <a href="#rodape">Projeto</a>
+      </nav>
+    </div>
+  </header>
 
-        <button type="submit" id="btn-analisar" class="btn">
-          Analisar música
-        </button>
-      </form>
+  <!-- HERO -->
+  <section class="hero">
+    <h1>Transforme música em <em>partitura</em> com IA</h1>
+    <p>Analise, separe instrumentos e gere partituras MusicXML editáveis no MuseScore 4.</p>
+  </section>
 
-      <div id="status" class="status" aria-live="polite"></div>
+  <!-- MAIN: duas colunas -->
+  <div class="main-content" id="pipeline">
 
-      <div id="audio-info" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Informações do áudio</h3>
+    <!-- ======== COLUNA ESQUERDA: CONTROLES ======== -->
+    <div class="left-column">
+
+      <!-- 1. UPLOAD -->
+      <div class="panel">
+        <div class="panel-title">
+          <span class="step-number">1</span>
+          Envie a música
+        </div>
+        <form id="upload-form" novalidate>
+          <label for="file-input" class="label">Arquivo de áudio</label>
+          <input type="file" id="file-input" name="file" accept=".mp3,.wav,.flac,.m4a,.ogg" />
+          <p class="hint">.mp3, .wav, .flac, .m4a, .ogg &middot; máximo 100 MB</p>
+          <button type="submit" id="btn-analisar" class="btn btn-primary mt-16">Analisar música</button>
+        </form>
+        <div id="status" class="status" aria-live="polite"></div>
+      </div>
+
+      <!-- 2. INFORMAÇÕES DO ÁUDIO -->
+      <div id="audio-info" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="icon">&#9836;</span> Informações do áudio</div>
         <div class="info-grid">
-          <div class="info-item"><span class="info-label">Duração:</span> <span id="info-duration">-</span></div>
-          <div class="info-item"><span class="info-label">Formato:</span> <span id="info-format">-</span></div>
-          <div class="info-item"><span class="info-label">Codec:</span> <span id="info-codec">-</span></div>
-          <div class="info-item"><span class="info-label">Sample rate:</span> <span id="info-sample">-</span></div>
-          <div class="info-item"><span class="info-label">Canais:</span> <span id="info-channels">-</span></div>
-          <div class="info-item"><span class="info-label">Bitrate:</span> <span id="info-bitrate">-</span></div>
-          <div class="info-item"><span class="info-label">Tamanho:</span> <span id="info-size">-</span></div>
+          <div class="info-item"><span class="info-label">Duração</span> <span id="info-duration">-</span></div>
+          <div class="info-item"><span class="info-label">Formato</span> <span id="info-format">-</span></div>
+          <div class="info-item"><span class="info-label">Codec</span> <span id="info-codec">-</span></div>
+          <div class="info-item"><span class="info-label">Sample rate</span> <span id="info-sample">-</span></div>
+          <div class="info-item"><span class="info-label">Canais</span> <span id="info-channels">-</span></div>
+          <div class="info-item"><span class="info-label">Bitrate</span> <span id="info-bitrate">-</span></div>
+          <div class="info-item"><span class="info-label">Tamanho</span> <span id="info-size">-</span></div>
         </div>
       </div>
 
-      <div id="music-info" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Análise musical</h3>
+      <!-- 3. ANÁLISE MUSICAL -->
+      <div id="music-info" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="icon">&#9834;</span> Análise musical</div>
         <div class="info-grid">
-          <div class="info-item"><span class="info-label">BPM:</span> <span id="info-bpm">-</span></div>
-          <div class="info-item"><span class="info-label">Tonalidade:</span> <span id="info-key">-</span></div>
-          <div class="info-item"><span class="info-label">Confiança do tom:</span> <span id="info-key-conf">-</span></div>
-          <div class="info-item"><span class="info-label">Estabilidade do BPM:</span> <span id="info-bpm-conf">-</span></div>
+          <div class="info-item"><span class="info-label">BPM</span> <span id="info-bpm">-</span></div>
+          <div class="info-item"><span class="info-label">Tonalidade</span> <span id="info-key">-</span></div>
+          <div class="info-item"><span class="info-label">Confiança do tom</span> <span id="info-key-conf">-</span></div>
+          <div class="info-item"><span class="info-label">Estabilidade do BPM</span> <span id="info-bpm-conf">-</span></div>
         </div>
         <p id="music-warning" class="music-warning hidden"></p>
-        <p class="hint" style="margin-top:10px; font-size:0.82rem;">
-          Resultados automáticos — podem exigir revisão musical. Baixa confiança indica harmonia ambígua ou ritmo instável.
-        </p>
       </div>
 
-      <div id="separate-section" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Separação de instrumentos</h3>
-        <p class="hint" id="separate-hint">Separe vocais, bateria, baixo e outros (4 stems) com Demucs — modelo htdemucs (CPU).</p>
-        <button id="btn-separate" class="btn" style="background:#059669; margin-top:12px;">Separar instrumentos</button>
+      <!-- PIPELINE COMPLETO — Etapa 8.3 -->
+      <div id="pipeline-section" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="step-number">&#9889;</span> Processar música completa</div>
+        <p class="hint">Executa todas as etapas automaticamente: análise, separação, transcrição, bateria, partitura e arranjo.</p>
+        <button id="btn-pipeline" class="btn btn-primary mt-16">Processar Música Completa</button>
+        <div id="pipeline-status" class="status" style="display:none;"></div>
+        <div id="pipeline-progress" class="hidden mt-16">
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="pipeline-progress-bar" style="width:0%"></div>
+          </div>
+          <div id="pipeline-stages-list" class="mt-8" style="font-size:13px; line-height:1.8;"></div>
+        </div>
+      </div>
+
+      <!-- 4. SEPARAÇÃO DE STEMS -->
+      <div id="separate-section" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="step-number">2</span> Separação de instrumentos</div>
+        <p class="hint">Separe vocais, bateria, baixo e outros (4 stems) com Demucs — modelo htdemucs (CPU).</p>
+        <button id="btn-separate" class="btn btn-secondary mt-16">Separar instrumentos</button>
         <div id="separate-status" class="status" style="display:none;"></div>
-        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Na primeira execução, o modelo pode precisar ser baixado (~80–100 MB). Processamento em CPU pode levar vários minutos.</p>
       </div>
 
-      <div id="stems-info" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Instrumentos separados</h3>
+      <!-- 5. STEMS -->
+      <div id="stems-info" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="icon">&#127925;</span> Instrumentos separados</div>
         <div class="stems-grid">
-          <div class="stem-item">
-            <span class="stem-label">Vocais</span>
-            <audio id="audio-vocals" controls preload="none"></audio>
-          </div>
-          <div class="stem-item">
-            <span class="stem-label">Bateria</span>
-            <audio id="audio-drums" controls preload="none"></audio>
-          </div>
-          <div class="stem-item">
-            <span class="stem-label">Baixo</span>
-            <audio id="audio-bass" controls preload="none"></audio>
-          </div>
-          <div class="stem-item">
-            <span class="stem-label">Outros</span>
-            <audio id="audio-other" controls preload="none"></audio>
-          </div>
+          <div class="stem-item"><span class="stem-label">Vocais</span><audio id="audio-vocals" controls preload="none"></audio></div>
+          <div class="stem-item"><span class="stem-label">Bateria</span><audio id="audio-drums" controls preload="none"></audio></div>
+          <div class="stem-item"><span class="stem-label">Baixo</span><audio id="audio-bass" controls preload="none"></audio></div>
+          <div class="stem-item"><span class="stem-label">Outros</span><audio id="audio-other" controls preload="none"></audio></div>
         </div>
         <p id="stems-warning" class="music-warning hidden"></p>
       </div>
 
-      <div id="transcribe-section" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Transcrição para notas</h3>
-        <p class="hint" id="transcribe-hint">Transcreva vocais, baixo e outros para MIDI com Basic Pitch (ONNX/TensorFlow).</p>
-        <button id="btn-transcribe" class="btn" style="background:#7c3aed; margin-top:12px;">Transcrever para notas</button>
+      <!-- 6. TRANSCRIÇÃO -->
+      <div id="transcribe-section" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="step-number">3</span> Transcrição para notas</div>
+        <p class="hint">Vocais, baixo e outros via Basic Pitch (ONNX). Bateria via análise percussiva.</p>
+        <button id="btn-transcribe" class="btn btn-secondary mt-16">Transcrever para notas</button>
         <div id="transcribe-status" class="status" style="display:none;"></div>
-        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Bateria: transcrição rítmica será adicionada em etapa futura. Processamento em CPU pode levar alguns minutos (3 stems sequenciais).</p>
       </div>
 
-      <div id="transcription-info" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Transcrição</h3>
+      <!-- 7. BATERIA -->
+      <div id="drums-section" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="icon">&#129345;</span> Bateria / Percussão</div>
+        <p class="hint">Transcreva kick, caixa, hi-hats, pratos e tons por análise espectral.</p>
+        <button id="btn-drums" class="btn btn-secondary mt-16">Transcrever bateria</button>
+        <div id="drums-status" class="status" style="display:none;"></div>
+        <div id="drums-summary" class="info-grid hidden mt-16">
+          <div class="info-item"><span class="info-label">Kick</span> <span id="drums-kick">-</span></div>
+          <div class="info-item"><span class="info-label">Caixa</span> <span id="drums-snare">-</span></div>
+          <div class="info-item"><span class="info-label">Hi-hat</span> <span id="drums-hihat">-</span></div>
+          <div class="info-item"><span class="info-label">Pratos</span> <span id="drums-cymbals">-</span></div>
+          <div class="info-item"><span class="info-label">Toms</span> <span id="drums-toms">-</span></div>
+        </div>
+      </div>
+
+      <!-- 8. TRANSCRIÇÃO RESULTADO -->
+      <div id="transcription-info" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="icon">&#9835;</span> Transcrição</div>
         <div class="stems-grid" id="transcription-grid">
-          <div class="stem-item" id="trans-vocals-card">
+          <div class="stem-item trans-item" id="trans-vocals-card">
             <span class="stem-label">Vocais</span>
             <span class="trans-info" id="trans-vocals-info">-</span>
-            <a id="trans-vocals-midi" class="btn" style="background:#0ea5e9; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MIDI</a>
+            <a id="trans-vocals-midi" class="btn btn-download" style="display:none;" download>Baixar MIDI</a>
             <a id="trans-vocals-json" class="hint" style="display:none;" target="_blank">Ver eventos</a>
           </div>
-          <div class="stem-item" id="trans-bass-card">
+          <div class="stem-item trans-item" id="trans-bass-card">
             <span class="stem-label">Baixo</span>
             <span class="trans-info" id="trans-bass-info">-</span>
-            <a id="trans-bass-midi" class="btn" style="background:#0ea5e9; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MIDI</a>
+            <a id="trans-bass-midi" class="btn btn-download" style="display:none;" download>Baixar MIDI</a>
             <a id="trans-bass-json" class="hint" style="display:none;" target="_blank">Ver eventos</a>
           </div>
-          <div class="stem-item" id="trans-other-card">
+          <div class="stem-item trans-item" id="trans-other-card">
             <span class="stem-label">Outros</span>
             <span class="trans-info" id="trans-other-info">-</span>
-            <a id="trans-other-midi" class="btn" style="background:#0ea5e9; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MIDI</a>
+            <a id="trans-other-midi" class="btn btn-download" style="display:none;" download>Baixar MIDI</a>
             <a id="trans-other-json" class="hint" style="display:none;" target="_blank">Ver eventos</a>
           </div>
-          <div class="stem-item" id="trans-drums-card" style="opacity:0.7;">
+          <div class="stem-item trans-item" id="trans-drums-card">
             <span class="stem-label">Bateria</span>
-            <span class="trans-info">Transcrição rítmica será adicionada em etapa futura.</span>
+            <span class="trans-info" id="trans-drums-info">Use o card "Bateria / Percussão" acima.</span>
           </div>
         </div>
         <p id="transcription-warning" class="music-warning hidden"></p>
       </div>
 
-      <div id="score-section" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Gerar partitura</h3>
-        <p class="hint">Quantização automática + MusicXML editável no MuseScore 4 (Vocais, Baixo, Outros).</p>
-        <div class="info-grid" style="margin-top:12px;">
-          <div class="info-item">
-            <label class="label" for="score-tempo">Andamento (BPM)</label>
-            <input id="score-tempo" type="number" min="30" max="300" step="1" value="89" style="width:100%; padding:8px;" />
+      <!-- 9. CONFIGURAR PARTITURA -->
+      <div id="score-section" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="step-number">4</span> Gerar partitura</div>
+        <div class="config-grid">
+          <div class="config-item">
+            <label class="label" for="score-tempo">BPM</label>
+            <input id="score-tempo" type="number" min="30" max="300" step="1" value="89" />
           </div>
-          <div class="info-item">
+          <div class="config-item">
             <label class="label" for="score-timesig">Compasso</label>
-            <select id="score-timesig" style="width:100%; padding:8px;">
+            <select id="score-timesig">
               <option value="4/4" selected>4/4</option>
               <option value="3/4">3/4</option>
               <option value="6/8">6/8</option>
             </select>
           </div>
-          <div class="info-item">
+          <div class="config-item">
             <label class="label" for="score-quant">Precisão rítmica</label>
-            <select id="score-quant" style="width:100%; padding:8px;">
+            <select id="score-quant">
               <option value="1/8">1/8</option>
               <option value="1/16" selected>1/16</option>
               <option value="1/32">1/32</option>
             </select>
           </div>
-          <div class="info-item">
+          <div class="config-item">
             <label class="label" for="score-keymode">Armadura</label>
-            <select id="score-keymode" style="width:100%; padding:8px;">
+            <select id="score-keymode">
               <option value="auto" selected>Automática</option>
               <option value="none">Sem armadura</option>
             </select>
           </div>
-          <div class="info-item">
+          <div class="config-item">
             <label class="label" for="score-cleanup">Estilo de transcrição</label>
-            <select id="score-cleanup" style="width:100%; padding:8px;">
+            <select id="score-cleanup">
               <option value="natural" selected>Natural</option>
               <option value="detailed">Detalhado</option>
             </select>
           </div>
         </div>
         <p id="score-key-hint" class="music-warning hidden"></p>
-        <button id="btn-generate-score" class="btn" style="background:#0d9488; margin-top:12px;">Gerar partitura MusicXML</button>
+        <button id="btn-generate-score" class="btn btn-primary mt-16">Gerar partitura MusicXML</button>
         <div id="score-status" class="status" style="display:none;"></div>
-        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Natural: prioriza linhas mais limpas, notas sustentadas e harmonia estável. Detalhado: preserva mais detalhes da transcrição.</p>
       </div>
 
-      <div id="score-info" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Partitura gerada</h3>
-        <div class="info-grid">
-          <div class="info-item"><span class="info-label">Partes:</span> <span id="score-parts">-</span></div>
-          <div class="info-item"><span class="info-label">BPM:</span> <span id="score-bpm">-</span></div>
-          <div class="info-item"><span class="info-label">Compasso:</span> <span id="score-timesig-info">-</span></div>
-          <div class="info-item"><span class="info-label">Quantização:</span> <span id="score-quant-info">-</span></div>
+      <!-- 10. ARRANJO -->
+      <div id="arrange-section" class="panel hidden" aria-live="polite">
+        <div class="panel-title"><span class="step-number">5</span> Criar arranjo</div>
+        <div class="chips-grid" id="arrange-instruments">
+          <label class="chip"><input type="checkbox" value="alto_sax" /> Sax Alto <span class="chip-check">&#10003;</span></label>
+          <label class="chip"><input type="checkbox" value="tenor_sax" /> Sax Tenor <span class="chip-check">&#10003;</span></label>
+          <label class="chip"><input type="checkbox" value="trumpet" /> Trompete <span class="chip-check">&#10003;</span></label>
+          <label class="chip"><input type="checkbox" value="trombone" /> Trombone <span class="chip-check">&#10003;</span></label>
+          <label class="chip"><input type="checkbox" value="clarinet" /> Clarinete <span class="chip-check">&#10003;</span></label>
         </div>
-        <p style="margin-top:12px;">
-          <a id="score-download" class="btn" style="background:#0d9488; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MusicXML</a>
-        </p>
-        <p id="score-warning" class="music-warning hidden"></p>
-      </div>
-
-      <div id="arrange-section" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Criar arranjo</h3>
-        <p class="hint">Arranjo determinístico para sopros (dobra de melodia + harmonias por regras).</p>
-        <div class="info-grid" style="margin-top:12px;" id="arrange-instruments">
-          <label class="info-item"><input type="checkbox" value="alto_sax" /> Sax Alto em Eb</label>
-          <label class="info-item"><input type="checkbox" value="tenor_sax" /> Sax Tenor em Bb</label>
-          <label class="info-item"><input type="checkbox" value="trumpet" /> Trompete em Bb</label>
-          <label class="info-item"><input type="checkbox" value="trombone" /> Trombone</label>
-          <label class="info-item"><input type="checkbox" value="clarinet" /> Clarinete em Bb</label>
-          <div class="info-item">
+        <div class="config-grid mt-16">
+          <div class="config-item">
             <label class="label" for="arrange-mode">Modo</label>
-            <select id="arrange-mode" style="width:100%; padding:8px;">
+            <select id="arrange-mode">
               <option value="automatic" selected>Automático</option>
               <option value="melody">Melodia</option>
               <option value="harmony">Harmonia</option>
             </select>
           </div>
-          <div class="info-item">
-            <label class="label" for="arrange-cleanup">Estilo de transcrição</label>
-            <select id="arrange-cleanup" style="width:100%; padding:8px;">
+          <div class="config-item">
+            <label class="label" for="arrange-cleanup">Perfil</label>
+            <select id="arrange-cleanup">
               <option value="natural" selected>Natural</option>
               <option value="detailed">Detalhado</option>
             </select>
           </div>
+          <div class="config-item">
+            <label class="label" for="arrange-style">Estilo</label>
+            <select id="arrange-style">
+              <option value="automatic" selected>Automático</option>
+              <option value="pop">Pop</option>
+              <option value="rock">Rock</option>
+              <option value="ballad">Balada</option>
+              <option value="brass_band">Brass Band</option>
+            </select>
+          </div>
+          <div class="config-item">
+            <label class="label" for="arrange-dynamics">Dinâmicas</label>
+            <select id="arrange-dynamics">
+              <option value="automatic" selected>Automáticas</option>
+              <option value="none">Nenhuma</option>
+            </select>
+          </div>
         </div>
-        <p style="margin-top:8px;">
+        <p class="mt-16">
           <label><input type="checkbox" id="arrange-include-originals" checked /> Incluir Vocais/Baixo/Outros</label>
+          <label style="margin-left:12px;"><input type="checkbox" id="arrange-include-drums" checked disabled /> Incluir bateria</label>
         </p>
-        <button id="btn-arrange" class="btn" style="background:#7c3aed; margin-top:12px;">Criar arranjo</button>
+        <button id="btn-arrange" class="btn btn-primary mt-16">Criar arranjo</button>
         <div id="arrange-status" class="status" style="display:none;"></div>
-        <p class="hint" style="margin-top:8px; font-size:0.82rem;">Natural: prioriza linhas mais limpas, notas sustentadas e harmonia estável. Detalhado: preserva mais detalhes da transcrição.</p>
       </div>
 
-      <div id="arrange-info" class="audio-info hidden" aria-live="polite">
-        <h3 class="info-title">Arranjo concluído</h3>
-        <div class="info-grid" id="arrange-result-grid"></div>
-        <p style="margin-top:12px;">
-          <a id="arrange-download" class="btn" style="background:#7c3aed; padding:8px 12px; font-size:0.9rem; display:none;" download>Baixar MusicXML do arranjo</a>
-        </p>
-        <p id="arrange-warning" class="music-warning hidden"></p>
+    </div>
+
+    <!-- ======== COLUNA DIREITA: RESULTADO ======== -->
+    <div class="right-column" id="resultado">
+
+      <!-- Visualizador da partitura -->
+      <div class="score-viewer-panel">
+        <div class="score-viewer-header">
+          <span class="score-viewer-title">Visualizador da Partitura</span>
+          <div class="score-viewer-toolbar">
+            <a id="score-download" class="toolbar-btn" style="display:none;" download>
+              <span>&#11015;</span> Download
+            </a>
+            <a id="arrange-download" class="toolbar-btn" style="display:none;" download>
+              <span>&#11015;</span> Arranjo
+            </a>
+          </div>
+        </div>
+
+        <!-- Papel bege: estado vazio -->
+        <div class="score-paper">
+          <div class="score-empty" id="score-empty-state">
+            <span class="empty-icon">&#9835;</span>
+            <div class="empty-title">Nenhuma partitura ainda</div>
+            <div class="empty-text">Envie uma música para gerar sua partitura.</div>
+          </div>
+
+          <!-- Informações da partitura (quando disponível) -->
+          <div class="score-result hidden" id="score-info">
+            <div class="score-result-info">
+              <div class="info-item"><span class="info-label">Partes</span> <span id="score-parts">-</span></div>
+              <div class="info-item"><span class="info-label">BPM</span> <span id="score-bpm">-</span></div>
+              <div class="info-item"><span class="info-label">Compasso</span> <span id="score-timesig-info">-</span></div>
+              <div class="info-item"><span class="info-label">Quantização</span> <span id="score-quant-info">-</span></div>
+            </div>
+            <p id="score-warning" class="music-warning hidden"></p>
+          </div>
+
+          <!-- Informações do arranjo (quando disponível) -->
+          <div class="score-result hidden" id="arrange-info">
+            <div class="panel-title" style="border:none; padding-bottom:8px;">Arranjo concluído</div>
+            <div class="score-result-info" id="arrange-result-grid"></div>
+            <p id="arrange-warning" class="music-warning hidden"></p>
+          </div>
+        </div>
       </div>
-    </section>
 
-    <footer class="footer">
-      <small>Etapa 7 &mdash; Arranjo para sopros (Sax Alto/Tenor, Trompete, Trombone, Clarinete) + MusicXML. O arranjo automático pode exigir revisão humana.</small>
-    </footer>
-  </main>
+    </div>
+  </div>
 
-  <script src="/static/app.js"></script>
+  <!-- FOOTER -->
+  <footer class="site-footer" id="rodape">
+    <div class="footer-inner">
+      <div class="footer-logo">
+        <span>&#9835;</span> Gerador de Partituras IA
+      </div>
+      <div class="footer-links">
+        <a href="#pipeline">Início</a>
+        <a href="#resultado">Partitura</a>
+        <a href="#rodape">Projeto</a>
+      </div>
+      <div class="footer-note">
+        Partituras MusicXML editáveis no MuseScore 4
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/app.js?v=2"></script>
 </body>
 </html>

@@ -104,6 +104,29 @@ from backend.musical.cleanup import (
     validate_cleanup_profile,
 )
 
+from backend.drums.drum_transcriber import (
+    DRUM_TIMEOUT,
+    are_drums_valid,
+    drum_config_key,
+    get_drums_info_data,
+    get_drums_json_path,
+    get_drums_wav,
+    transcribe_drums_async,
+)
+
+from backend.drums.drum_job_manager import (
+    create_drum_job,
+    get_drum_job,
+    update_drum_job,
+    has_active_drum_job,
+    drum_job_to_dict,
+    get_active_drum_job,
+)
+
+from backend.drums.drum_utils import DRUM_CLASSES, DRUM_SR, DRUM_VERSION
+
+from backend.arrangement.styles import ARRANGEMENT_STYLES
+
 from backend.arrangement.arrangement_generator import (
     ARRANGE_TIMEOUT,
     arrangement_config_key,
@@ -431,7 +454,7 @@ def analyze_audio(file_id: str):
     music_dict = None
     music_warning = None
     try:
-        music_result = analyze_music(path, duration_probe=meta.duration)
+        music_result = analyze_music(path, duration_probe=meta.duration, file_id=file_id)
         music_dict = music_result.to_api_dict()
         # Se houver warning técnico (ex: áudio curto), propaga como campo opcional no topo para frontend
         if music_result.warning:
@@ -479,17 +502,32 @@ def analyze_audio(file_id: str):
 # Separação de stems — job em background
 # ---------------------------------------------------------------------------
 
+async def _separation_message_updater(job_id: str):
+    """Transiciona 'Carregando modelo' -> 'Separando instrumentos' após delay.
+
+    Bug fix: antes, a mensagem 'Carregando modelo htdemucs...' ficava visível
+    durante TODA a separação (que leva minutos), pois separate_stems_async()
+    é uma única chamada bloqueante e não havia transição de estado.
+    Este updater muda a mensagem após 60s (tempo típico de carregar modelo).
+    """
+    await asyncio.sleep(60)
+    job = get_job(job_id)
+    if job and job.status == "running" and "Carregando modelo" in (job.message or ""):
+        update_job(job_id, message="Separando instrumentos... (processamento em CPU, pode levar vários minutos)")
+
+
 async def _run_separation_job(job_id: str, file_id: str, input_path: Path):
     """
     Executa separação em background, atualizando job registry.
     Não bloqueia request; captura stdout/returncode via stem_separator.
     """
+    # Updater de mensagem: após 60s, transiciona de "Carregando" para "Separando"
+    msg_task = asyncio.create_task(_separation_message_updater(job_id))
     try:
         update_job(job_id, status="running", message="Separando instrumentos... (pode levar vários minutos, CPU)")
         logger.info(f"Job {job_id} running file_id={file_id}")
 
-        # Passos graduais para progresso honesto (não percent falsa)
-        # Mensagens intermediárias
+        # Fase inicial: carregando modelo (primeira execução pode baixar)
         update_job(job_id, message="Carregando modelo htdemucs... (primeira execução pode baixar modelo)")
 
         result = await separate_stems_async(input_path, file_id, timeout=DEMUCS_TIMEOUT)
@@ -541,6 +579,9 @@ async def _run_separation_job(job_id: str, file_id: str, input_path: Path):
     except Exception as e:
         logger.error(f"Job {job_id} erro inesperado file_id={file_id}: {e}", exc_info=True)
         update_job(job_id, status="failed", message="Não foi possível separar os instrumentos.", error=str(e))
+    finally:
+        # Cancela o updater de mensagem (não faz nada se já concluiu)
+        msg_task.cancel()
 
 
 @app.post("/api/separate/{file_id}")
@@ -587,16 +628,16 @@ async def separate_audio(file_id: str):
         logger.warning(f"Demucs não disponível ao tentar separar file_id={file_id} python={get_demucs_python()}")
         raise HTTPException(status_code=503, detail="Demucs não está instalado. Configure .venv-demucs com demucs==4.1.0")
 
-    # 5. Proteção um job por vez
-    if has_active_job():
+    # 5. Proteção um job por vez (ATÔMICA — bug fix para race condition)
+    # Antes: has_active_job() + create_job() separados permitiam double-start.
+    from backend.audio.job_manager import create_job_exclusive
+    job = create_job_exclusive(file_id, status="queued", message="Preparando separação...")
+    if job is None:
         active = get_active_job()
         logger.warning(f"Separação já em andamento job={active.job_id if active else 'unknown'} solicitado file_id={file_id}")
         raise HTTPException(status_code=409, detail="Já existe uma separação em andamento. Aguarde concluir.")
 
-    # 6. Cria job queued
-    job = create_job(file_id, status="queued", message="Preparando separação...")
-
-    # 7. Agenda background (não bloqueia)
+    # 6. Agenda background (não bloqueia)
     # Mensagem inicial honesta (não percent falsa)
     update_job(job.job_id, message="Preparando modelo htdemucs...")
 
@@ -744,6 +785,7 @@ def demucs_info():
 async def _run_transcription_job(job_id: str, file_id: str):
     """
     Executa transcrição dos 3 stems sequencialmente, atualizando job registry.
+    Etapa 8.2: reporta progresso real por stem (percent, chunks quando longo).
     """
     try:
         update_transcription_job(job_id, status="running", message="Preparando transcrição...")
@@ -756,26 +798,47 @@ async def _run_transcription_job(job_id: str, file_id: str):
             logger.info(f"Transcription job {job_id} already_completed file_id={file_id}")
             return
 
-        # Mensagens honestas por stem
         stems_to_process = TRANSCRIBED_STEMS  # vocals, bass, other
+        total_stems = len(stems_to_process)
+
+        # Etapa 8.2: duração total para progresso real (não timer artificial)
+        from backend.audio.long_audio import make_progress
+        from backend.audio.transcriber import _get_stem_duration_ffprobe
+        from backend.audio.stem_separator import STEMS_DIR as STEMS_DIR_SEP
+        stem_durations = {}
+        for s in stems_to_process:
+            sp = STEMS_DIR_SEP / file_id / f"{s}.wav"
+            stem_durations[s] = _get_stem_duration_ffprobe(sp) or 0.0
+        total_audio_seconds = max(stem_durations.values()) if stem_durations else 0.0
+
+        # Nomes em português para o estágio
+        stem_names_pt = {"vocals": "vocais", "bass": "baixo", "other": "acompanhamento"}
+        # Peso por stem: usa duração real (fallback igual para todos)
+        weights = {}
+        for s in stems_to_process:
+            weights[s] = stem_durations.get(s) or (total_audio_seconds / total_stems if total_audio_seconds else 1.0)
+        weight_sum = sum(weights.values()) or 1.0
+
+        processed_weight = 0.0
 
         for idx, stem in enumerate(stems_to_process):
-            if stem == "vocals":
-                msg = "Transcrevendo vocais..."
-            elif stem == "bass":
-                msg = "Transcrevendo baixo..."
-            else:
-                msg = "Transcrevendo acompanhamento..."
-            update_transcription_job(job_id, message=msg)
-            logger.info(f"Transcription job {job_id} stem={stem} ({idx+1}/{len(stems_to_process)})")
+            stem_pt = stem_names_pt.get(stem, stem)
+            msg = f"Transcrevendo {stem_pt}..."
 
-            # O transcriber processa um stem por vez; se falhar, levanta e job vai para failed
-            # Usa transcribe_all_stems_async internamente sequencial, mas aqui chamamos por stem para progresso
-            # Para simplificar, chamamos transcribe_all mas com progresso por stem:
-            # Na verdade vamos chamar transcribe_all de uma vez e atualizar mensagens antes
-            # Para ter progresso granular, chamamos stem a stem via transcribe_stem
+            # Progresso: fração ponderada pelos stems já concluídos + atual
+            stem_frac = weights[stem] / weight_sum
+            processed_frac = processed_weight / weight_sum
+            progress = make_progress(
+                stage=f"Transcrevendo {stem_pt}",
+                processed_seconds=processed_frac * total_audio_seconds if total_audio_seconds else idx,
+                total_seconds=total_audio_seconds if total_audio_seconds else total_stems,
+                current_chunk=idx + 1,
+                total_chunks=total_stems,
+            )
+            update_transcription_job(job_id, message=msg, progress=progress)
+            logger.info(f"Transcription job {job_id} stem={stem} ({idx+1}/{total_stems}) progress={progress}")
+
             from backend.audio.transcriber import transcribe_stem_async
-            from backend.audio.stem_separator import STEMS_DIR as STEMS_DIR_SEP
             stem_path = STEMS_DIR_SEP / file_id / f"{stem}.wav"
             if not stem_path.is_file():
                 raise FileNotFoundError(f"Stem não encontrado: {stem}")
@@ -783,8 +846,20 @@ async def _run_transcription_job(job_id: str, file_id: str):
             # Chama transcrição do stem individual com timeout por stem
             await transcribe_stem_async(stem_path, file_id, stem, timeout=BASIC_PITCH_TIMEOUT)
 
-            # Atualiza status intermediário
-            update_transcription_job(job_id, message=f"{msg} concluído ({idx+1}/{len(stems_to_process)})")
+            processed_weight += weights[stem]
+
+            # Progresso após concluir este stem
+            done_frac = processed_weight / weight_sum
+            progress_done = make_progress(
+                stage=f"{stem_pt.capitalize()} concluído",
+                processed_seconds=done_frac * total_audio_seconds if total_audio_seconds else (idx + 1),
+                total_seconds=total_audio_seconds if total_audio_seconds else total_stems,
+                current_chunk=idx + 1,
+                total_chunks=total_stems,
+            )
+            update_transcription_job(job_id,
+                                     message=f"{msg} concluído ({idx+1}/{total_stems})",
+                                     progress=progress_done)
 
         # Valida final
         update_transcription_job(job_id, message="Validando MIDI...")
@@ -869,20 +944,21 @@ async def transcribe_audio(file_id: str):
         logger.warning(f"Basic Pitch não disponível file_id={file_id} python={get_basic_pitch_python()}")
         raise HTTPException(status_code=503, detail="Basic Pitch não está instalado. Configure .venv-basicpitch com basic-pitch==0.4.0")
 
-    # Proteção um job por vez (transcrição)
-    if has_active_transcription_job():
+    # Proteção um job por vez (transcrição) — ATÔMICA (bug fix race condition)
+    from backend.audio.transcription_job_manager import create_transcription_job_exclusive
+    job = create_transcription_job_exclusive(file_id, status="queued", message="Preparando transcrição...")
+    if job is None:
         active = get_active_transcription_job()
         logger.warning(f"Transcrição já em andamento job={active.job_id if active else 'unknown'} file_id={file_id}")
         raise HTTPException(status_code=409, detail="Já existe uma transcrição em andamento. Aguarde concluir.")
 
-    # Também respeita Demucs job ativo? Não bloqueia transcription se Demucs estiver rodando? Para proteger CPU, bloqueia qualquer job ativo
-    # Mas spec diz apenas 1 transcrição por vez, não menciona Demucs; vamos permitir Demucs e transcription simultâneos? Para proteger CPU, vamos bloquear se houver qualquer job ativo de ambos?
-    # Simplifica: apenas verifica transcription jobs, permite Demucs paralelo (mas pode pesar). Para proteger CPU máxima, verifica ambos.
+    # Também respeita Demucs job ativo (proteção de CPU)
     if has_active_job():
         logger.warning(f"Demucs em andamento, bloqueando transcrição file_id={file_id}")
+        # Marca o job recém-criado como failed para não deixar estado inconsistente
+        update_transcription_job(job.job_id, status="failed", message="Bloqueado: separação em andamento.")
         raise HTTPException(status_code=409, detail="Já existe uma separação em andamento. Aguarde concluir.")
 
-    job = create_transcription_job(file_id, status="queued", message="Preparando transcrição...")
     update_transcription_job(job.job_id, message="Preparando transcrição...")
 
     asyncio.create_task(_run_transcription_job(job.job_id, file_id))
@@ -1033,6 +1109,160 @@ def basic_pitch_info():
             "expected_stems": list(TRANSCRIBED_STEMS),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Bateria / percussão — Etapa 8 (jobs e endpoints)
+# ---------------------------------------------------------------------------
+
+async def _run_drum_job(job_id: str, file_id: str, config: dict):
+    """Transcreve drums.wav em background (segundos em CPU)."""
+    try:
+        update_drum_job(job_id, status="running", message="Detectando ataques...")
+        logger.info(f"Drum job {job_id} running file_id={file_id} config={config}")
+
+        drums_wav = get_drums_wav(file_id)
+        if drums_wav is None:
+            raise FileNotFoundError("Separe os instrumentos antes de transcrever a bateria.")
+
+        # BPM/offset das Etapas 3/7 (sem BPM separado para drums).
+        ctx = get_music_context(file_id)
+        tempo = ctx.get("tempo") or 120
+        if ctx.get("tempo") is None:
+            logger.warning(f"Drum job {job_id}: BPM indisponível, fallback 120.")
+        beat_offset = float(ctx.get("beat_offset") or 0.0)
+
+        update_drum_job(job_id, message="Classificando bateria...")
+        data = await transcribe_drums_async(
+            drums_wav, file_id, tempo, beat_offset,
+            time_signature=config.get("time_signature", "4/4"),
+            cleanup_profile=config.get("cleanup_profile", "natural"),
+            timeout=DRUM_TIMEOUT,
+        )
+        update_drum_job(job_id, message="Quantizando ritmo...")
+        await asyncio.sleep(0.1)
+        update_drum_job(job_id, status="completed", message="Concluído.",
+                        results={"events": len(data.get("events", [])),
+                                 "stats": data.get("stats", {})})
+        logger.info(f"Drum job {job_id} completed file_id={file_id}")
+    except FileNotFoundError as e:
+        update_drum_job(job_id, status="failed", message=str(e), error=str(e))
+    except (asyncio.TimeoutError, TimeoutError) as e:
+        update_drum_job(job_id, status="failed",
+                        message="A transcrição da bateria excedeu o tempo limite.",
+                        error=str(e))
+    except ValueError as e:
+        update_drum_job(job_id, status="failed", message=str(e), error=str(e))
+    except Exception as e:
+        logger.error(f"Drum job {job_id} erro inesperado file_id={file_id}: {e}", exc_info=True)
+        update_drum_job(job_id, status="failed",
+                        message="Não foi possível transcrever a bateria.", error=str(e))
+
+
+@app.get("/api/drums/info")
+def drums_info():
+    return JSONResponse(status_code=200, content={
+        "success": True,
+        "available": True,
+        "method": "spectral-onset",
+        "sample_rate": int(DRUM_SR),
+        "classes": list(DRUM_CLASSES),
+        "version": str(DRUM_VERSION),
+        "timeout_seconds": int(DRUM_TIMEOUT),
+    })
+
+
+@app.post("/api/drums/{file_id}")
+async def transcribe_drums(file_id: str, payload: Optional[dict] = None):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    body = payload or {}
+    try:
+        cleanup_profile = validate_cleanup_profile(body.get("cleanup_profile", "natural"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    time_signature = body.get("time_signature", "4/4")
+    if time_signature not in ("4/4", "3/4", "6/8"):
+        raise HTTPException(status_code=400, detail="time_signature inválida.")
+
+    if get_drums_wav(file_id) is None:
+        raise HTTPException(
+            status_code=409, detail="Separe os instrumentos antes de transcrever a bateria.")
+
+    config = {"cleanup_profile": cleanup_profile, "time_signature": time_signature}
+    # Idempotência: mesmo config + versão -> already_completed.
+    try:
+        ok, _ = are_drums_valid(file_id)
+        if ok:
+            existing = get_drums_info_data(file_id)
+            if existing and existing.get("available") \
+                    and existing.get("config_key") == drum_config_key(
+                        file_id, cleanup_profile, time_signature):
+                job = create_drum_job(file_id, status="completed", message="Concluído.")
+                job.already_completed = True
+                update_drum_job(job.job_id, status="completed", message="Concluído.",
+                                config=config, results=existing, already_completed=True)
+                return JSONResponse(status_code=200, content={
+                    "success": True, "job_id": job.job_id, "file_id": file_id,
+                    "status": "completed", "already_completed": True,
+                    "message": "Bateria já transcrita.", "drums": existing,
+                })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.debug(f"Idempotência drums falhou, segue: {e}")
+
+    if has_active_drum_job():
+        raise HTTPException(status_code=409,
+                            detail="Já existe uma transcrição de bateria em andamento.")
+    from backend.drums.drum_job_manager import create_drum_job_exclusive
+    job = create_drum_job_exclusive(file_id, status="queued", message="Preparando...", config=config)
+    if job is None:
+        raise HTTPException(status_code=409,
+                            detail="Já existe uma transcrição de bateria em andamento.")
+    asyncio.create_task(_run_drum_job(job.job_id, file_id, config))
+    return JSONResponse(status_code=200, content={
+        "success": True, "job_id": job.job_id, "file_id": file_id,
+        "status": "queued", "already_completed": False,
+        "message": "Transcrição de bateria agendada.", "config": config,
+    })
+
+
+@app.get("/api/drums/status/{job_id}")
+def get_drum_status(job_id: str):
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_id inválido.")
+    job = get_drum_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404,
+                            detail="Job não encontrado. Reiniciar servidor perde jobs em memória.")
+    data = drum_job_to_dict(job)
+    if job.status == "completed" and job.file_id:
+        info = get_drums_info_data(job.file_id)
+        if info and info.get("available"):
+            data["drums"] = info
+            if not data.get("results"):
+                data["results"] = info
+    return JSONResponse(status_code=200, content={"success": True, **data})
+
+
+@app.get("/api/drums/{file_id}")
+def read_drums(file_id: str):
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    info = get_drums_info_data(file_id)
+    if not info:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+    if not info.get("available"):
+        raise HTTPException(status_code=404,
+                            detail="Bateria não encontrada. Transcreva a bateria primeiro.")
+    return JSONResponse(status_code=200, content={"success": True, **info})
 
 
 # ---------------------------------------------------------------------------
@@ -1192,10 +1422,8 @@ async def create_score(file_id: str, payload: Optional[dict] = None):
             detail="music21 não está instalado. Configure .venv-notation com music21==10.5.0",
         )
 
-    if has_active_notation_job():
-        active = get_active_notation_job()
-        logger.warning(f"Score já em andamento job={active.job_id if active else 'unknown'} file_id={file_id}")
-        raise HTTPException(status_code=409, detail="Já existe uma geração de partitura em andamento. Aguarde concluir.")
+    # Proteção atômica (bug fix race condition)
+    from backend.notation.notation_job_manager import create_notation_job_exclusive
 
     norm_tempo_cfg = None
     if tempo is not None:
@@ -1208,7 +1436,11 @@ async def create_score(file_id: str, payload: Optional[dict] = None):
         "key_mode": key_mode,
         "cleanup_profile": cleanup_profile,
     }
-    job = create_notation_job(file_id, status="queued", message="Preparando partitura...", config=config)
+    job = create_notation_job_exclusive(file_id, status="queued", message="Preparando partitura...", config=config)
+    if job is None:
+        active = get_active_notation_job()
+        logger.warning(f"Score já em andamento job={active.job_id if active else 'unknown'} file_id={file_id}")
+        raise HTTPException(status_code=409, detail="Já existe uma geração de partitura em andamento. Aguarde concluir.")
     update_notation_job(job.job_id, message="Preparando partitura...")
     asyncio.create_task(_run_score_job(job.job_id, file_id, config))
     return JSONResponse(status_code=200, content={
@@ -1347,6 +1579,8 @@ def arrangement_info():
         "instruments": instruments_info(),
         "supported_modes": list(SUPPORTED_ARRANGE_MODES),
         "supported_cleanup_profiles": list(CLEANUP_PROFILES),
+        "supported_styles": list(ARRANGEMENT_STYLES),
+        "supported_dynamics": ["automatic", "none"],
         "max_instruments": 5,
         "timeout_seconds": int(ARRANGE_TIMEOUT),
     })
@@ -1365,6 +1599,9 @@ async def create_arrangement(file_id: str, payload: Optional[dict] = None):
             body.get("instruments", []),
             body.get("mode", "automatic"),
             body.get("include_original_parts", True),
+            body.get("arrangement_style", "automatic"),
+            body.get("include_drums", True),
+            body.get("dynamics", "automatic"),
         )
         cfg["cleanup_profile"] = cleanup_profile
     except ValueError as e:
@@ -1381,7 +1618,10 @@ async def create_arrangement(file_id: str, payload: Optional[dict] = None):
         if existing and existing.get("available") and existing.get("musicxml_available"):
             ck = arrangement_config_key(cfg["instruments"], cfg["mode"],
                                         cfg["include_original_parts"],
-                                        cleanup_profile=cfg["cleanup_profile"])
+                                        cleanup_profile=cfg["cleanup_profile"],
+                                        arrangement_style=cfg["arrangement_style"],
+                                        include_drums=cfg["include_drums"],
+                                        dynamics=cfg["dynamics"])
             if existing.get("config_key") == ck \
                     and existing.get("base_config_key") == str(base.get("config_key", "")):
                 job = create_arrangement_job(file_id, status="completed",
@@ -1406,14 +1646,16 @@ async def create_arrangement(file_id: str, payload: Optional[dict] = None):
             status_code=503,
             detail="music21 não está instalado. Configure .venv-notation com music21==10.5.0")
 
-    if has_active_arrangement_job():
+    # Proteção atômica (bug fix race condition)
+    from backend.arrangement.arrangement_job_manager import create_arrangement_job_exclusive
+    job = create_arrangement_job_exclusive(file_id, status="queued",
+                                           message="Analisando melodia...", config=cfg)
+    if job is None:
         active = get_active_arrangement_job()
         logger.warning(f"Arrange já em andamento job={active.job_id if active else 'unknown'}")
         raise HTTPException(status_code=409,
                             detail="Já existe um arranjo em andamento. Aguarde concluir.")
 
-    job = create_arrangement_job(file_id, status="queued",
-                                 message="Analisando melodia...", config=cfg)
     asyncio.create_task(_run_arrange_job(job.job_id, file_id, cfg))
     return JSONResponse(status_code=200, content={
         "success": True, "job_id": job.job_id, "file_id": file_id,
@@ -1487,3 +1729,130 @@ def download_arrangement(file_id: str):
         media_type="application/vnd.recordare.musicxml+xml",
         filename="arranjo.musicxml",
     )
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE COMPLETO — Etapa 8.3
+# ---------------------------------------------------------------------------
+
+@app.post("/api/pipeline/{file_id}")
+async def start_pipeline(file_id: str, payload: Optional[dict] = None):
+    """Inicia pipeline completo: analysis → demucs → transcription → drums → score → arrangement."""
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    path = _find_upload_path(file_id)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+
+    body = payload or {}
+
+    # Valida config
+    cleanup_profile = body.get("cleanup_profile", "natural")
+    from backend.musical.cleanup import validate_cleanup_profile
+    try:
+        cleanup_profile = validate_cleanup_profile(cleanup_profile)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    arrangement_style = body.get("arrangement_style", "automatic")
+    from backend.arrangement.styles import validate_style
+    try:
+        arrangement_style = validate_style(arrangement_style)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    instruments = body.get("instruments", [])
+    if not isinstance(instruments, list):
+        instruments = []
+
+    config = {
+        "cleanup_profile": cleanup_profile,
+        "arrangement_style": arrangement_style,
+        "include_drums": bool(body.get("include_drums", True)),
+        "include_original_parts": bool(body.get("include_original_parts", True)),
+        "dynamics": body.get("dynamics", "automatic"),
+        "instruments": instruments,
+        "time_signature": body.get("time_signature", "4/4"),
+        "quantization": body.get("quantization", "1/16"),
+        "key_mode": body.get("key_mode", "auto"),
+        "tempo": body.get("tempo"),
+    }
+
+    # Atomic double-start protection
+    from backend.pipeline.pipeline_job_manager import (
+        create_pipeline_job_exclusive, has_active_pipeline_job,
+    )
+    if has_active_pipeline_job():
+        raise HTTPException(status_code=409,
+                           detail="Já existe um pipeline em andamento. Aguarde concluir.")
+
+    with_arrangement = bool(instruments)
+    job = create_pipeline_job_exclusive(file_id, config=config,
+                                          with_arrangement=with_arrangement)
+    if job is None:
+        raise HTTPException(status_code=409,
+                           detail="Já existe um pipeline em andamento.")
+
+    from backend.pipeline.pipeline_runner import run_pipeline
+    asyncio.create_task(run_pipeline(job.job_id, file_id, config))
+
+    return JSONResponse(status_code=200, content={
+        "success": True,
+        "job_id": job.job_id,
+        "file_id": file_id,
+        "status": "queued",
+        "message": "Pipeline agendado.",
+        "config": config,
+    })
+
+
+@app.get("/api/pipeline/status/{job_id}")
+def get_pipeline_status(job_id: str):
+    """Consulta status do pipeline."""
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_id inválido.")
+
+    from backend.pipeline.pipeline_job_manager import (
+        get_pipeline_job, pipeline_job_to_dict,
+    )
+    job = get_pipeline_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404,
+                           detail="Job não encontrado. Reiniciar servidor perde jobs em memória.")
+    return JSONResponse(status_code=200,
+                       content={"success": True, **pipeline_job_to_dict(job)})
+
+
+@app.get("/api/pipeline/{file_id}")
+def get_pipeline_for_file(file_id: str):
+    """Retorna o pipeline mais recente para um file_id."""
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_id inválido.")
+
+    from backend.pipeline.pipeline_job_manager import (
+        get_pipeline_job, pipeline_job_to_dict, _JOBS,
+    )
+    # Busca o job mais recente para este file_id
+    latest = None
+    for j in _JOBS.values():
+        if j.file_id == file_id:
+            if latest is None or j.created_at > latest.created_at:
+                latest = j
+
+    if not latest:
+        return JSONResponse(status_code=200, content={
+            "success": True,
+            "file_id": file_id,
+            "available": False,
+            "message": "Nenhum pipeline executado para este arquivo.",
+        })
+    return JSONResponse(status_code=200,
+                       content={"success": True, "available": True,
+                               **pipeline_job_to_dict(latest)})

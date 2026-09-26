@@ -1,240 +1,1013 @@
-* {
+/* ============================================================
+   GERADOR DE PARTITURAS IA — Redesign premium
+   Paleta extraída de imagens/design do site.jpg
+   ============================================================ */
+
+/* 1. VARIABLES ============================================== */
+:root {
+  /* Navy base — extraído da imagem */
+  --bg-main: #0e1b2e;
+  --bg-gradient-top: #14263e;
+  --bg-gradient-bottom: #0a1524;
+  --header-bg: #1e3b59;
+  --panel: rgba(21, 39, 63, 0.85);
+  --panel-solid: #15273f;
+  --panel-border: rgba(143, 163, 189, 0.15);
+  --panel-hover: rgba(30, 59, 89, 0.5);
+
+  /* Texto */
+  --text-primary: #f5f0e8;
+  --text-secondary: #8fa3bd;
+  --text-muted: #5b7191;
+
+  /* Acentos — laranja queimado e dourado da imagem */
+  --accent: #c6793b;
+  --accent-hover: #dda561;
+  --accent-active: #a86430;
+  --accent-gradient: linear-gradient(135deg, #c6793b 0%, #dda561 100%);
+  --gold: #dda561;
+  --gold-dim: rgba(221, 165, 97, 0.3);
+
+  /* Papel de partitura — bege da imagem */
+  --paper: #efe5d2;
+  --paper-dark: #e6dbc7;
+  --paper-text: #3a3530;
+  --paper-shadow: rgba(0, 0, 0, 0.3);
+
+  /* Estados */
+  --success: #4ade80;
+  --success-dim: rgba(74, 222, 128, 0.15);
+  --danger: #f87171;
+  --danger-dim: rgba(248, 113, 113, 0.15);
+  --warning: #fbbf24;
+
+  /* Layout */
+  --max-width: 1240px;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.5);
+  --transition: 0.25s ease;
+
+  /* Fontes */
+  --font-serif: Georgia, 'Times New Roman', 'Segoe UI', serif;
+  --font-sans: 'Segoe UI', -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  --font-mono: 'Cascadia Code', 'Consolas', monospace;
+}
+
+/* 2. RESET / BASE =========================================== */
+*, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
+html {
+  scroll-behavior: smooth;
+  background-color: #0e1b2e;
+}
+
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: #f6f7fb;
-  color: #1a1a2e;
-  line-height: 1.5;
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #f5f0e8;
+  color: var(--text-primary);
+  background-color: #0e1b2e;
+  background-color: var(--bg-main);
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+img { max-width: 100%; height: auto; }
+a { color: var(--gold); text-decoration: none; transition: color var(--transition); }
+a:hover { color: var(--accent-hover); }
+
+:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+.hidden { display: none !important; }
+
+/* 3. BACKGROUND ============================================= */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(180deg, #14263e 0%, #0e1b2e 40%, #0a1524 100%);
+}
+
+/* Linhas de pauta decorativas */
+.staff-lines {
+  position: fixed;
+  top: 120px;
+  right: -60px;
+  width: 300px;
+  pointer-events: none;
+  opacity: 0.04;
+  z-index: 0;
+}
+.staff-lines span {
+  display: block;
+  height: 1px;
+  margin-bottom: 24px;
+  background: #8fa3bd;
+}
+
+/* 4. HEADER ================================================= */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(30, 59, 89, 0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--panel-border);
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
+}
+
+.header-inner {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  height: 64px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-serif);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-decoration: none;
+  letter-spacing: 0.5px;
+}
+
+.logo:hover { color: var(--gold); }
+
+.logo-icon {
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  font-size: 24px;
+  color: var(--gold);
+  background: rgba(198, 121, 59, 0.15);
+  border-radius: 8px;
 }
 
-.container {
-  width: 100%;
-  max-width: 640px;
+.main-nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
-.header {
+.main-nav a {
+  color: var(--text-secondary);
+  font-size: 14px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition), background var(--transition);
+}
+
+.main-nav a:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.main-nav a.active {
+  color: var(--gold);
+}
+
+/* Mobile hamburger */
+.nav-toggle {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 8px;
+}
+
+/* 5. HERO =================================================== */
+.hero {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 48px 24px 32px;
   text-align: center;
-  margin-bottom: 24px;
 }
 
-.header h1 {
-  font-size: 2rem;
-  font-weight: 800;
-  color: #1a1a2e;
-  margin-bottom: 8px;
+.hero h1 {
+  font-family: var(--font-serif);
+  font-size: clamp(28px, 4vw, 42px);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
 }
 
-.description {
-  color: #555;
-  font-size: 0.98rem;
+.hero h1 em {
+  font-style: normal;
+  color: var(--gold);
 }
 
-.card {
-  background: #fff;
-  border-radius: 12px;
-  padding: 28px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.07);
-  border: 1px solid #e8eaf0;
+.hero p {
+  font-size: 16px;
+  color: var(--text-secondary);
+  max-width: 580px;
+  margin: 0 auto;
 }
 
-.label {
-  display: block;
+/* 6. LAYOUT PRINCIPAL ====================================== */
+.main-content {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 24px 24px 60px;
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+/* 7. PAINÉIS =============================================== */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+  margin-bottom: 20px;
+  transition: border-color var(--transition);
+}
+
+.panel:hover {
+  border-color: rgba(143, 163, 189, 0.25);
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-serif);
+  font-size: 17px;
   font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.panel-title .icon {
+  font-size: 20px;
+  color: var(--gold);
+}
+
+.step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-gradient);
+  color: var(--bg-main);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* 8. FORMS ================================================== */
+label.label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
   margin-bottom: 8px;
-  font-size: 0.95rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 input[type="file"] {
   width: 100%;
-  padding: 10px;
-  border: 2px dashed #cbd0e0;
-  border-radius: 8px;
-  background: #fafbff;
+  padding: 12px;
+  background: rgba(14, 27, 46, 0.6);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 14px;
   cursor: pointer;
-  font-size: 0.95rem;
+  transition: border-color var(--transition);
 }
 
 input[type="file"]:hover {
-  border-color: #6c7bff;
-  background: #f0f2ff;
+  border-color: var(--gold-dim);
 }
 
-.hint {
-  margin-top: 10px;
-  font-size: 0.85rem;
-  color: #6b7280;
-}
-
-.btn {
-  margin-top: 20px;
-  width: 100%;
-  padding: 13px 20px;
-  font-size: 1rem;
-  font-weight: 700;
-  color: #fff;
-  background: #4f46e5;
+input[type="file"]::file-selector-button {
+  background: var(--accent-gradient);
+  color: var(--bg-main);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
+  padding: 10px 20px;
+  margin-right: 12px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s, opacity 0.15s;
+  transition: filter var(--transition);
 }
 
-.btn:hover:not(:disabled) {
-  background: #4338ca;
+input[type="file"]::file-selector-button:hover {
+  filter: brightness(1.1);
+}
+
+input[type="number"],
+select {
+  width: 100%;
+  padding: 10px 14px;
+  background: rgba(14, 27, 46, 0.6);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: border-color var(--transition), box-shadow var(--transition);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+select {
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238fa3bd' stroke-width='2'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
+  padding-right: 36px;
+}
+
+input[type="number"]:focus,
+select:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px var(--gold-dim);
+}
+
+select option {
+  background: var(--bg-main);
+  color: var(--text-primary);
+}
+
+input[type="number"] {
+  cursor: text;
+}
+
+input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* 9. BOTÕES ================================================= */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 24px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition);
+  text-decoration: none;
+  white-space: nowrap;
 }
 
 .btn:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
+  filter: grayscale(0.5);
 }
 
+/* Botão principal — laranja/dourado como GERAR PARTITURA da imagem */
+.btn-primary {
+  background: var(--accent-gradient);
+  color: #fff;
+  font-size: 16px;
+  padding: 16px 32px;
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(198, 121, 59, 0.35);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  width: 100%;
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  box-shadow: 0 6px 24px rgba(198, 121, 59, 0.45);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active:not(:disabled) {
+  filter: brightness(0.95);
+  transform: translateY(0);
+}
+
+/* Botão secundário — azul translúcido */
+.btn-secondary {
+  background: rgba(30, 59, 89, 0.6);
+  color: var(--text-primary);
+  border: 1px solid var(--panel-border);
+  width: 100%;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: rgba(30, 59, 89, 0.9);
+  border-color: var(--gold-dim);
+}
+
+.btn-download {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--success);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  padding: 10px 20px;
+  font-size: 14px;
+}
+
+.btn-download:hover {
+  background: rgba(74, 222, 128, 0.25);
+}
+
+/* Spinner CSS */
+.spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 10. STATUS / PROGRESSO ==================================== */
 .status {
-  margin-top: 18px;
-  padding: 12px 14px;
-  border-radius: 8px;
-  font-size: 0.92rem;
-  min-height: 20px;
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
   display: none;
 }
 
 .status.visible {
   display: block;
+  animation: fadeIn 0.2s ease;
 }
 
 .status.info {
-  background: #eff6ff;
-  color: #1e40af;
-  border: 1px solid #bfdbfe;
+  background: rgba(30, 59, 89, 0.5);
+  color: var(--text-secondary);
+  border: 1px solid var(--panel-border);
 }
 
 .status.success {
-  background: #ecfdf5;
-  color: #065f46;
-  border: 1px solid #a7f3d0;
+  background: var(--success-dim);
+  color: var(--success);
+  border: 1px solid rgba(74, 222, 128, 0.3);
 }
 
 .status.error {
-  background: #fef2f2;
-  color: #991b1b;
-  border: 1px solid #fecaca;
+  background: var(--danger-dim);
+  color: var(--danger);
+  border: 1px solid rgba(248, 113, 113, 0.3);
 }
 
-.audio-info {
-  margin-top: 20px;
-  padding: 16px 18px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
+/* Barra de progresso visual */
+.progress-bar-container {
+  margin-top: 10px;
+  height: 6px;
+  background: rgba(14, 27, 46, 0.8);
+  border-radius: 3px;
+  overflow: hidden;
 }
 
-.audio-info.hidden {
-  display: none;
+.progress-bar {
+  height: 100%;
+  background: var(--accent-gradient);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+  min-width: 0;
 }
 
-.info-title {
-  font-size: 1rem;
-  font-weight: 700;
-  color: #1e293b;
-  margin-bottom: 12px;
+.progress-text {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: pre;
+  margin-top: 6px;
 }
 
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.processing {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* 11. INFO CARDS =========================================== */
 .info-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 16px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
 }
 
 .info-item {
-  font-size: 0.88rem;
-  color: #334155;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  background: rgba(14, 27, 46, 0.5);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition);
+}
+
+.info-item:hover {
+  border-color: var(--gold-dim);
 }
 
 .info-label {
+  font-size: 11px;
   font-weight: 600;
-  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
 }
 
-@media (max-width: 480px) {
-  .info-grid {
-    grid-template-columns: 1fr;
-  }
+.info-item span:not(.info-label) {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--text-primary);
 }
 
-.music-warning {
-  margin-top: 12px;
-  padding: 10px 12px;
-  background: #fffbeb;
-  border: 1px solid #fcd34d;
-  color: #92400e;
-  border-radius: 6px;
-  font-size: 0.88rem;
-}
+.confidence-high { color: var(--success); }
+.confidence-medium { color: var(--warning); }
+.confidence-low { color: var(--danger); }
 
-.music-warning.hidden {
-  display: none;
-}
-
-.confidence-high {
-  color: #065f46;
-  font-weight: 600;
-}
-
-.confidence-medium {
-  color: #b45309;
-  font-weight: 600;
-}
-
-.confidence-low {
-  color: #b91c1c;
-  font-weight: 600;
-}
-
+/* 12. STEMS / ÁUDIO CARDS =================================== */
 .stems-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px 16px;
-  margin-top: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
 }
 
 .stem-item {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  gap: 8px;
+  padding: 14px;
+  background: rgba(14, 27, 46, 0.5);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition);
+}
+
+.stem-item:hover {
+  border-color: var(--gold-dim);
 }
 
 .stem-label {
-  font-weight: 700;
-  color: #1e293b;
-  font-size: 0.9rem;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stem-label::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gold);
 }
 
 .stem-item audio {
   width: 100%;
   height: 36px;
+  border-radius: var(--radius-sm);
 }
 
-@media (max-width: 520px) {
+/* 13. TRANSCRIÇÃO =========================================== */
+.trans-info {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.trans-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trans-item .btn,
+.trans-item a {
+  align-self: flex-start;
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
+/* 14. SCORE VIEWER (papel) ================================== */
+.score-viewer-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  min-height: 500px;
+  display: flex;
+  flex-direction: column;
+}
+
+.score-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--panel-border);
+  background: rgba(30, 59, 89, 0.3);
+}
+
+.score-viewer-title {
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.score-viewer-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: rgba(14, 27, 46, 0.6);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.toolbar-btn:hover {
+  background: rgba(30, 59, 89, 0.6);
+  color: var(--text-primary);
+}
+
+/* Área de papel bege — partitura */
+.score-paper {
+  flex: 1;
+  background: var(--paper);
+  padding: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  background-image:
+    linear-gradient(rgba(163, 152, 132, 0.08) 1px, transparent 1px);
+  background-size: 100% 28px;
+  min-height: 350px;
+}
+
+/* Empty state */
+.score-empty {
+  text-align: center;
+  color: #8b8272;
+}
+
+.score-empty .empty-icon {
+  font-size: 72px;
+  margin-bottom: 16px;
+  opacity: 0.3;
+  display: block;
+}
+
+.score-empty .empty-title {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  font-weight: 600;
+  color: #6b6355;
+  margin-bottom: 8px;
+}
+
+.score-empty .empty-text {
+  font-size: 14px;
+  color: #8b8272;
+  max-width: 300px;
+  margin: 0 auto;
+}
+
+/* Resultado da partitura quando disponível */
+.score-result {
+  width: 100%;
+}
+
+.score-result-info {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.score-result-info .info-item {
+  background: rgba(255, 255, 255, 0.5);
+  border-color: rgba(163, 152, 132, 0.3);
+}
+
+.score-result-info .info-label {
+  color: #8b8272;
+}
+
+.score-result-info .info-item span:not(.info-label) {
+  color: var(--paper-text);
+}
+
+/* 15. ARRANJO =============================================== */
+.chips-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: rgba(14, 27, 46, 0.6);
+  border: 1px solid var(--panel-border);
+  border-radius: 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+  user-select: none;
+}
+
+.chip:hover {
+  border-color: var(--gold-dim);
+  color: var(--text-primary);
+}
+
+.chip input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chip.checked {
+  background: rgba(198, 121, 59, 0.15);
+  border-color: var(--accent);
+  color: var(--gold);
+}
+
+.chip .chip-check {
+  font-size: 12px;
+  color: var(--gold);
+  display: none;
+}
+
+.chip.checked .chip-check {
+  display: inline;
+}
+
+/* Checkbox estilizado como chip */
+label.chip {
+  position: relative;
+}
+
+/* Config grid */
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.config-item label.label {
+  margin-bottom: 6px;
+}
+
+/* 16. FOOTER ================================================= */
+.site-footer {
+  background: rgba(20, 31, 49, 0.95);
+  border-top: 1px solid var(--panel-border);
+  padding: 28px 24px;
+}
+
+.footer-inner {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.footer-logo {
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footer-links {
+  display: flex;
+  gap: 24px;
+}
+
+.footer-links a {
+  font-size: 13px;
+  color: var(--text-secondary);
+  transition: color var(--transition);
+}
+
+.footer-links a:hover {
+  color: var(--gold);
+}
+
+.footer-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* 17. RESPONSIVE ============================================ */
+@media (max-width: 1024px) {
+  .main-content {
+    grid-template-columns: 1fr;
+  }
+
+  .score-viewer-panel {
+    min-height: 400px;
+  }
+}
+
+@media (max-width: 768px) {
+  .main-nav {
+    display: none;
+  }
+
+  .nav-toggle {
+    display: block;
+  }
+
+  .main-nav.open {
+    display: flex;
+    position: absolute;
+    top: 64px;
+    left: 0;
+    right: 0;
+    background: rgba(30, 59, 89, 0.98);
+    flex-direction: column;
+    padding: 16px;
+    gap: 4px;
+    border-bottom: 1px solid var(--panel-border);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .hero {
+    padding: 32px 16px 24px;
+  }
+
+  .main-content {
+    padding: 16px 16px 40px;
+  }
+
+  .panel {
+    padding: 18px;
+  }
+
+  .info-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  }
+
   .stems-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .footer-inner {
+    flex-direction: column;
+    text-align: center;
+    gap: 12px;
+  }
+
+  .footer-links {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .footer-note {
+    text-align: center;
+  }
+}
+
+@media (max-width: 430px) {
+  .hero h1 {
+    font-size: 24px;
+  }
+
+  .btn-primary {
+    font-size: 15px;
+    padding: 14px 24px;
+  }
+
+  .info-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .config-grid {
     grid-template-columns: 1fr;
   }
 }
 
-.footer {
-  text-align: center;
-  margin-top: 18px;
-  color: #9aa0b5;
-  font-size: 0.8rem;
+/* 18. MOTION / ACESSIBILIDADE =============================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* 19. UTILITÁRIOS =========================================== */
+.text-center { text-align: center; }
+.mt-8 { margin-top: 8px; }
+.mt-16 { margin-top: 16px; }
+.mt-24 { margin-top: 24px; }
+.mb-8 { margin-bottom: 8px; }
+.mb-16 { margin-bottom: 16px; }
+.mb-24 { margin-bottom: 24px; }
+.full-width { width: 100%; }
+.left-column { min-width: 0; }
+.right-column { min-width: 0; display: flex; flex-direction: column; }
+
+.music-warning {
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: rgba(251, 191, 36, 0.1);
+  color: var(--warning);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.hint strong {
+  color: var(--text-secondary);
 }

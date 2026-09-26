@@ -16,6 +16,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
+from typing import List, Optional
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 if str(BASE_DIR) not in sys.path:
@@ -33,6 +34,12 @@ from backend.arrangement.instrument_definitions import (  # noqa: E402
     get_instrument,
 )
 from backend.musical.cleanup import validate_cleanup_profile  # noqa: E402
+from backend.arrangement.styles import (  # noqa: E402
+    apply_style_to_drums,
+    get_style,
+    validate_style,
+)
+from backend.drums.drum_transcriber import get_drums_json_path  # noqa: E402
 from backend.notation.score_utils import (  # noqa: E402
     PART_NAMES,
     beats_per_measure,
@@ -74,7 +81,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mode", default="automatic")
     p.add_argument("--base-config-key", default="")
     p.add_argument("--cleanup-profile", default="detailed")
+    p.add_argument("--arrangement-style", default="automatic")
+    p.add_argument("--dynamics", default="automatic")
+    p.add_argument("--drums-json", default=None)
     p.add_argument("--include-original-parts", action="store_true")
+    p.add_argument("--include-drums", action="store_true")
     return p.parse_args()
 
 
@@ -141,8 +152,237 @@ def build_wind_part(inst_id: str, concert_line: list, args, key_norm,
     return part
 
 
+# ---------------------------------------------------------------------------
+# Bateria / percussão (Etapa 8)
+# ---------------------------------------------------------------------------
+
+# displayStep, displayOctave, notehead|None, quarterLength, storedInstrument|None.
+# Posições em pauta de percussão: kick inferior, snare central, hats/pratos X.
+DRUM_DISPLAY = {
+    "kick": ("F", 4, None, 0.5, "BassDrum"),
+    "snare": ("C", 5, None, 0.5, "SnareDrum"),
+    "closed_hihat": ("G", 5, "x", 0.25, None),
+    "open_hihat": ("A", 5, "x", 0.5, None),
+    "crash": ("B", 5, "x", 1.0, "CrashCymbals"),
+    "tom_low": ("A", 4, None, 0.5, None),
+    "tom_mid": ("D", 5, None, 0.5, None),
+    "tom_high": ("F", 5, None, 0.5, None),
+}
+# Voice 1 (pratos/caixa/toms) x Voice 2 (bumbo). Sem voice 0 (Etapa 6).
+DRUM_UPPER = {"snare", "closed_hihat", "open_hihat", "crash",
+              "tom_low", "tom_mid", "tom_high"}
+DRUM_LOWER = {"kick"}
+
+
+def _drum_hit(inst: str, qlen: float, strength: float = 0.6):
+    """Uma cabeça de percussão (sempre instância nova)."""
+    from music21 import instrument as m21instrument
+    from music21 import note as m21note
+    step, octv, head, _, stored = DRUM_DISPLAY[inst]
+    n = m21note.Unpitched()
+    n.displayStep = step
+    n.displayOctave = octv
+    n.quarterLength = float(qlen)
+    if head:
+        n.notehead = head
+    if stored:
+        try:
+            n.storedInstrument = getattr(m21instrument, stored)()
+        except Exception:
+            pass
+    try:
+        n.volume.velocity = max(1, min(127, int(32 + float(strength) * 95)))
+    except Exception:
+        pass
+    return n
+
+
+def build_drum_part(drum_events: list, args, mlen: float, first_part: bool):
+    """Parte Bateria: PercussionClef, 2 voices (1=pratos/caixa/toms, 2=bumbo).
+
+    Hits simultâneos de classes distintas (ex.: snare + closed_hihat no mesmo
+    tempo) caem na mesma voice (UPPER) e são preservados. Sem KeySignature,
+    sem ties.
+    """
+    from music21 import clef as m21clef
+    from music21 import instrument as m21instrument
+    from music21 import meter as m21meter
+    from music21 import note as m21note
+    from music21 import stream as m21stream
+    from music21 import tempo as m21tempo
+
+    part = m21stream.Part()
+    part.partName = "Bateria"
+    part.partAbbreviation = "Bat."
+    part.insert(0, m21instrument.UnpitchedPercussion())
+    if first_part:
+        part.insert(0, m21tempo.MetronomeMark(number=int(args.tempo)))
+    part.insert(0, m21clef.PercussionClef())
+    part.insert(0, m21meter.TimeSignature(args.time_signature))
+    total = 0.0
+    for e in drum_events:
+        total = max(total, round(float(e.get("beat", 0)), 6) + 0.5)
+    if total <= 0:
+        raise ValueError("Eventos de bateria vazios")
+    n_meas = max(1, int(total // mlen) + (1 if total % mlen > 1e-6 else 0))
+    total = round(n_meas * mlen, 6)
+    for voice_id, classes in ((1, DRUM_UPPER), (2, DRUM_LOWER)):
+        v = m21stream.Voice()
+        v.id = voice_id
+        cursor = 0.0
+        for e in sorted(drum_events, key=lambda x: float(x.get("beat", 0))):
+            if e.get("instrument") not in classes:
+                continue
+            start = round(float(e.get("beat", 0)), 6)
+            ql = DRUM_DISPLAY[e["instrument"]][3]
+            if start > cursor + 1e-9:
+                r = m21note.Rest()
+                r.quarterLength = round(start - cursor, 6)
+                v.insert(cursor, r)
+                cursor = start
+            # Permite notas simultâneas na mesma voice (ex.: snare + hat no
+            # mesmo tempo). Não pula se start <= cursor; apenas insere.
+            v.insert(start, _drum_hit(e["instrument"], ql,
+                                      float(e.get("strength", 0.6))))
+            cursor = max(cursor, start + ql)
+        if total > cursor + 1e-9:
+            r = m21note.Rest()
+            r.quarterLength = round(total - cursor, 6)
+            v.insert(cursor, r)
+        part.insert(0, v)
+    try:
+        part.makeMeasures(inPlace=True)
+    except Exception as e:
+        raise ValueError(f"makeMeasures falhou na bateria: {e}")
+    _renumber_voices(part)
+    return part
+
+
+# ---------------------------------------------------------------------------
+# Dinâmica e articulações (Etapa 8)
+# ---------------------------------------------------------------------------
+
+DYNAMIC_LEVELS = ["pp", "p", "mp", "mf", "f", "ff"]
+
+
+def _velocity_levels(velocities: List[float], bias: int = 0) -> List[int]:
+    """Percentis p20/p40/p60/p80 por parte -> níveis 0..5 + bias (relativo)."""
+    vs = sorted(velocities)
+    if not vs:
+        return []
+    if max(vs) - min(vs) < 1e-9:
+        return [max(0, min(5, 2 + bias))] * len(vs)  # uniforme -> mp
+    def pct(p: float) -> float:
+        return vs[min(len(vs) - 1, int(len(vs) * p / 100.0))]
+    cuts = [pct(20), pct(40), pct(60), pct(80)]
+
+    def level(v: float) -> int:
+        lv = 5
+        for i, c in enumerate(cuts):
+            if v < c:
+                lv = i
+                break
+        else:
+            lv = 4 if v < (cuts[3] + (max(vs) - cuts[3]) / 2.0) else 5
+        return max(0, min(5, lv + bias))
+    return [level(v) for v in velocities]
+
+
+def _part_note_items(part):
+    """[(offset_absoluto, quarterLength, elemento)] ordenados (pós-measures)."""
+    from music21 import stream as m21stream
+    items = []
+    for m in part.getElementsByClass(m21stream.Measure):
+        base = float(part.elementOffset(m))
+        for el in m.notesAndRests:
+            if el.isRest:
+                continue
+            items.append((round(base + float(el.offset), 6), float(el.quarterLength), el))
+    items.sort(key=lambda t: t[0])
+    return items
+
+
+def _insert_at_absolute(part, offset: float, el) -> None:
+    """Insere elemento em offset absoluto (dentro do Measure correto)."""
+    from music21 import stream as m21stream
+    for m in part.getElementsByClass(m21stream.Measure):
+        base = float(part.elementOffset(m))
+        if base <= offset < base + float(m.quarterLength) + 1e-9:
+            m.insert(max(0.0, offset - base), el)
+            return
+    part.insert(offset, el)
+
+
+def apply_dynamics_articulations(part, part_name: str, is_melody: bool,
+                                 is_harmony: bool, dynamics_mode: str,
+                                 dyn_bias: int, accent_downbeats: bool) -> dict:
+    """Dinâmica por blocos (percentis da parte) + acentos/staccato/tenuto.
+
+    Não altera pitches. Slurs: omitidos (regras frágeis — etapa futura).
+    """
+    from music21 import articulations as m21art
+    from music21 import chord as m21chord
+    from music21 import dynamics as m21dyn
+    from music21 import note as m21note
+    stats = {"dynamics_marks": 0, "accents": 0, "staccatos": 0, "tenutos": 0}
+    items = _part_note_items(part)
+    if not items:
+        return stats
+    vels = []
+    for _, _, el in items:
+        try:
+            if isinstance(el, m21chord.Chord):
+                vels.append(float(el.volume.velocity))
+            elif isinstance(el, m21note.Note):
+                vels.append(float(el.volume.velocity))
+            else:  # Unpitched
+                vels.append(float(getattr(el.volume, "velocity", 64)))
+        except Exception:
+            vels.append(64.0)
+    levels = _velocity_levels(vels, bias=dyn_bias) if dynamics_mode == "automatic" else [2] * len(items)
+    # Dinâmica: marca só quando o nível muda (blocos, sem poluir).
+    if dynamics_mode == "automatic":
+        current = None
+        for (off, _, _), lv in zip(items, levels):
+            if lv != current:
+                _insert_at_absolute(part, off, m21dyn.Dynamic(DYNAMIC_LEVELS[lv]))
+                stats["dynamics_marks"] += 1
+                current = lv
+    # Articulações (mutação direta, sem re-split: pós-makeMeasures/makeTies).
+    for idx, (off, ql, el) in enumerate(items):
+        tied = getattr(el, "tie", None)
+        if tied is not None and tied.type in ("continue", "stop"):
+            continue  # só cabeça do tie recebe articulação
+        is_strong = abs(off - round(off)) < 1e-6
+        vel = vels[idx]
+        if vel >= sorted(vels)[min(len(vels) - 1, int(len(vels) * 0.9))]:
+            if is_strong or (accent_downbeats and el.__class__.__name__ != "Rest"):
+                try:
+                    el.articulations.append(m21art.Accent())
+                    stats["accents"] += 1
+                    continue
+                except Exception:
+                    pass
+        if is_melody and ql <= 0.25 + 1e-9 and tied is None:
+            nxt = items[idx + 1][0] if idx + 1 < len(items) else off + ql
+            if nxt - (off + ql) >= 0.25 - 1e-9 and el.__class__.__name__ == "Note":
+                try:
+                    el.articulations.append(m21art.Staccato())
+                    stats["staccatos"] += 1
+                except Exception:
+                    pass
+        elif is_harmony and ql >= 2.0 - 1e-9:
+            try:
+                el.articulations.append(m21art.Tenuto())
+                stats["tenutos"] += 1
+            except Exception:
+                pass
+    return stats
+
+
 def validate_arrangement(musicxml_path: Path, expected: list, concert_lines: dict,
-                         include_originals: bool) -> dict:
+                         include_originals: bool, drums_expected: bool = False,
+                         drums_input_beats: Optional[list] = None) -> dict:
     """Reabre e valida por parte (nomes), transposição, ranges e voice 0."""
     from music21 import converter, meter, stream, tempo
     info: dict = {}
@@ -215,6 +455,29 @@ def validate_arrangement(musicxml_path: Path, expected: list, concert_lines: dic
                 time_signature=ts[0].ratioString,
                 measures=sum(len(list(pt.getElementsByClass(stream.Measure))) for pt in parts),
                 notes=len(list(parsed.recurse().notes)))
+    if drums_expected:
+        from music21 import clef as _m21clef
+        dpt = by_name.get("Bateria")
+        if dpt is None:
+            raise ValueError("Parte Bateria ausente")
+        dunpitched = [e for e in dpt.flatten().notesAndRests
+                      if type(e).__name__ == "Unpitched"]
+        if not dunpitched:
+            raise ValueError("Parte Bateria vazia no reparse")
+        clefs = list(dpt.recurse().getElementsByClass(_m21clef.PercussionClef))
+        if not clefs:
+            raise ValueError("PercussionClef ausente na bateria")
+        nvoices = sum(len(list(m.voices)) for m in
+                      dpt.getElementsByClass(stream.Measure))
+        if nvoices == 0:
+            raise ValueError("Bateria sem voices")
+        info["drums_notes"] = len(dunpitched)
+        if drums_input_beats:
+            sim_in = sum(1 for b in set(drums_input_beats)
+                         if drums_input_beats.count(b) >= 2)
+            if sim_in and nvoices < 2:
+                raise ValueError("Simultaneidade da bateria perdida (1 voice)")
+            info["drums_simultaneous_beats"] = sim_in
     return info
 
 
@@ -268,9 +531,16 @@ def main() -> None:
     if not melody:
         raise ValueError("Melodia vazia: sem material em vocals/other.")
     defs = [get_instrument(i) for i in inst_ids]
+    style_name = validate_style(getattr(args, "arrangement_style", "automatic"))
+    style = get_style(style_name)
+    dynamics_mode = getattr(args, "dynamics", "automatic")
+    if dynamics_mode not in ("automatic", "none"):
+        raise ValueError("dynamics inválido. Permitidos: automatic, none.")
     lines, report = arrange(melody, other_items, defs, mode=args.mode,
                             simplify=True, profile=profile,
-                            bass_notes=bass_notes)
+                            bass_notes=bass_notes,
+                            style_params={"breath_mult": style["breath_mult"],
+                                          "harm_min_dur_mult": style["harm_min_dur_mult"]})
     for inst_id, st in report.get("stats", {}).items():
         if inst_id not in report.get("roles", {}) or not isinstance(st, dict):
             continue  # ex. stats de simplify: não é instrumento
@@ -312,8 +582,66 @@ def main() -> None:
         first_wind = False
         score.insert(0, part)
 
+    # Bateria (Etapa 8): parte de percussão se solicitada e transcrita.
+    drum_events: list = []
+    drums_wanted = bool(getattr(args, "include_drums", False))
+    drums_path = getattr(args, "drums_json", None) or str(
+        Path(__file__).resolve().parents[2] / "drums" / args.file_id / "drums.json")
+    if drums_wanted:
+        try:
+            with open(drums_path, "r", encoding="utf-8") as f:
+                drums_data = json.load(f)
+            drum_events = apply_style_to_drums(
+                drums_data.get("events", []) or [], style_name)
+            removed = len(drums_data.get("events", []) or []) - len(drum_events)
+            if removed:
+                warnings.append(f"Estilo {style_name}: {removed} hit(s) de bateria filtrados.")
+        except FileNotFoundError:
+            warnings.append("Bateria solicitada mas transcrição indisponível; "
+                            "transcreva a bateria primeiro.")
+            drum_events = []
+        except Exception as e:
+            warnings.append(f"Bateria ignorada (JSON inválido): {e}")
+            drum_events = []
+    drum_part_built = False
+    if drum_events:
+        try:
+            dpart = build_drum_part(drum_events, args, mlen, first_part=first_wind)
+            first_wind = False
+            score.insert(0, dpart)
+            drum_part_built = True
+        except Exception as e:
+            warnings.append(f"Parte de bateria não gerada: {e}")
+
+    # Dinâmica/articulações (pós-measures; não altera pitches).
+    melody_names = {"Vocais"}
+    for inst_id, role in report.get("roles", {}).items():
+        if role == "melody":
+            d = get_instrument(inst_id)
+            if d:
+                melody_names.add(d.name)
+    harmony_names = {"Outros"}
+    for inst_id in ("alto_sax", "trombone"):
+        d = get_instrument(inst_id)
+        if d:
+            harmony_names.add(d.name)
+    dyn_totals = {"dynamics_marks": 0, "accents": 0, "staccatos": 0, "tenutos": 0}
+    if dynamics_mode == "automatic":
+        for pt in score.parts:
+            pname = pt.partName or ""
+            res = apply_dynamics_articulations(
+                pt, pname, is_melody=pname in melody_names,
+                is_harmony=pname in harmony_names, dynamics_mode=dynamics_mode,
+                dyn_bias=int(style["dynamics_bias"]),
+                accent_downbeats=bool(style["accent_downbeats"]))
+            for k in dyn_totals:
+                dyn_totals[k] += res.get(k, 0)
+
     score.write("musicxml", fp=str(out_xml))
-    validation = validate_arrangement(out_xml, inst_ids, lines, args.include_original_parts)
+    validation = validate_arrangement(
+        out_xml, inst_ids, lines, args.include_original_parts,
+        drums_expected=drum_part_built,
+        drums_input_beats=[round(float(e.get("beat", 0)), 6) for e in drum_events])
 
     # Checagem das partes originais reaproveitada da Etapa 6.
     if args.include_original_parts:
@@ -366,8 +694,18 @@ def main() -> None:
         "beat_offset": beat_offset,
         "mode": args.mode,
         "include_original_parts": bool(args.include_original_parts),
+        "arrangement_style": style_name,
+        "include_drums": drums_wanted,
+        "dynamics": dynamics_mode,
+        "drums": ({
+            "events": len(drum_events),
+            "part_built": drum_part_built,
+            "notes": validation.get("drums_notes", 0),
+        } if (drums_wanted or drum_part_built) else None),
+        "dynamics_stats": dyn_totals,
         "config_key": _ck(inst_ids, args.mode, bool(args.include_original_parts),
-                          cleanup_profile=profile),
+                          cleanup_profile=profile, arrangement_style=style_name,
+                          include_drums=drums_wanted, dynamics=dynamics_mode),
         "base_config_key": args.base_config_key or "",
         "instruments": instruments_model,
         "melody_source": mel_stats.get("source"),

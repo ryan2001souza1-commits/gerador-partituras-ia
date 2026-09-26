@@ -27,6 +27,8 @@ class TranscriptionJob:
     results: Optional[Dict] = None
     error: Optional[str] = None
     already_completed: bool = False
+    # Etapa 8.2 — progresso real (payload de make_progress ou similar)
+    progress: Optional[Dict] = None
 
 _JOBS: Dict[str, TranscriptionJob] = {}
 _LOCK = threading.Lock()
@@ -48,6 +50,30 @@ def create_transcription_job(file_id: str, status: str = "queued", message: str 
     with _LOCK:
         _JOBS[job_id] = job
     return job
+
+def create_transcription_job_exclusive(file_id: str, status: str = "queued",
+                                       message: str = "Preparando transcrição...") -> Optional[TranscriptionJob]:
+    """Cria job APENAS se não houver outro ativo (atomic check-and-create).
+
+    Bug fix: elimina race condition onde dois POSTs simultâneos criavam
+    jobs de transcrição duplicados.
+    """
+    with _LOCK:
+        for j in _JOBS.values():
+            if j.status in ("queued", "running"):
+                return None
+        job_id = str(uuid.uuid4())
+        now = _now_iso()
+        job = TranscriptionJob(
+            job_id=job_id,
+            file_id=file_id,
+            status=status,
+            message=message,
+            created_at=now,
+            updated_at=now,
+        )
+        _JOBS[job_id] = job
+        return job
 
 def get_transcription_job(job_id: str) -> Optional[TranscriptionJob]:
     with _LOCK:
@@ -79,7 +105,7 @@ def get_active_transcription_job() -> Optional[TranscriptionJob]:
         return None
 
 def transcription_job_to_dict(job: TranscriptionJob) -> Dict:
-    return {
+    d = {
         "job_id": job.job_id,
         "file_id": job.file_id,
         "status": job.status,
@@ -91,6 +117,9 @@ def transcription_job_to_dict(job: TranscriptionJob) -> Dict:
         "error": job.error,
         "already_completed": job.already_completed,
     }
+    if job.progress is not None:
+        d["progress"] = job.progress
+    return d
 
 def clear_transcription_jobs():
     with _LOCK:

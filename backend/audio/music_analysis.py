@@ -70,6 +70,26 @@ class MusicAnalysisResult:
     duration_analyzed: Optional[float] = None
     # interno: mantém bruto para debug (não exposto na API final necessariamente)
     beats_count: Optional[int] = None
+    # PERFORMANCE (otimização): primeiro beat em segundos, extraído do beat_track
+    # interno. Elimina chamada separada a get_beat_grid() que re-decodificava
+    # o arquivo e re-executava HPSS (economia: ~30s para áudio de 3min).
+    first_beat_time: Optional[float] = None
+    # PRECISÃO AVANÇADA — métricas de janelas/consenso
+    # BPM
+    bpm_local_median: Optional[float] = None
+    bpm_local_mad: Optional[float] = None
+    bpm_window_agreement: Optional[float] = None
+    bpm_stability: Optional[float] = None
+    bpm_windows_valid: Optional[int] = None
+    bpm_half_double_method: Optional[str] = None
+    beat_grid_mean_error_ms: Optional[float] = None
+    beat_grid_p95_error_ms: Optional[float] = None
+    # Key
+    key_window_agreement: Optional[float] = None
+    key_score_margin: Optional[float] = None
+    key_windows_valid: Optional[int] = None
+    key_method_agreement: Optional[float] = None
+    key_analysis_used: Optional[str] = None  # "global" | "windows" | "ensemble"
 
     def to_api_dict(self) -> Dict[str, Any]:
         """Converte para dict compatível com spec da Etapa 3."""
@@ -85,6 +105,33 @@ class MusicAnalysisResult:
             d["warning"] = self.warning
         if self.error:
             d["error"] = self.error
+        # PRECISÃO AVANÇADA — métricas de janelas/consenso (transparência real)
+        if self.bpm_stability is not None:
+            d["bpm_stability"] = round(self.bpm_stability, 3)
+        if self.bpm_local_median is not None:
+            d["bpm_local_median"] = self.bpm_local_median
+        if self.bpm_local_mad is not None:
+            d["bpm_local_mad"] = self.bpm_local_mad
+        if self.bpm_window_agreement is not None:
+            d["bpm_window_agreement"] = round(self.bpm_window_agreement, 3)
+        if self.bpm_windows_valid is not None:
+            d["bpm_windows_valid"] = self.bpm_windows_valid
+        if self.bpm_half_double_method is not None:
+            d["bpm_half_double_method"] = self.bpm_half_double_method
+        if self.beat_grid_mean_error_ms is not None:
+            d["beat_grid_mean_error_ms"] = self.beat_grid_mean_error_ms
+        if self.beat_grid_p95_error_ms is not None:
+            d["beat_grid_p95_error_ms"] = self.beat_grid_p95_error_ms
+        if self.key_window_agreement is not None:
+            d["key_window_agreement"] = round(self.key_window_agreement, 3)
+        if self.key_score_margin is not None:
+            d["key_score_margin"] = round(self.key_score_margin, 4)
+        if self.key_windows_valid is not None:
+            d["key_windows_valid"] = self.key_windows_valid
+        if self.key_method_agreement is not None:
+            d["key_method_agreement"] = self.key_method_agreement
+        if self.key_analysis_used is not None:
+            d["key_analysis_used"] = self.key_analysis_used
         return d
 
 
@@ -254,16 +301,366 @@ def _decode_to_wav(input_path: Path, timeout: int = FFMPEG_TIMEOUT) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# PRECISÃO AVANÇADA — Análise por janelas (Etapa de precisão)
+# ---------------------------------------------------------------------------
+
+# Window analysis: divide a música em segmentos e analisa cada um
+# separadamente, depois consolida por consenso ponderado.
+KEY_WINDOW_SEC = 15.0     # janela para tonalidade
+BPM_WINDOW_SEC = 20.0     # janela para BPM
+MIN_WINDOWS_FOR_CONSENSUS = 3   # mínimo de janelas válidas para usar consenso
+MIN_DURATION_FOR_WINDOWS = 30.0  # só usa janelas se áudio >= 30s
+
+
+def _window_key_analysis(y_harm: np.ndarray, sr: int,
+                         chroma: Optional[np.ndarray] = None
+                         ) -> Optional[Dict[str, Any]]:
+    """Análise de tonalidade por janelas com consenso ponderado por energia.
+
+    Returns:
+        Dict com keys: windows_total, windows_valid, agreement, best_key,
+        best_mode, margin, energy_weight_mean, per_window (list de dicts)
+        ou None se insuficiente.
+    """
+    try:
+        import librosa
+    except Exception:
+        return None
+
+    duration = float(len(y_harm)) / sr
+    if duration < MIN_DURATION_FOR_WINDOWS:
+        return None  # Áudio curto demais para análise por janelas
+
+    # Reusa chroma se já foi calculado pelo caller
+    if chroma is None:
+        try:
+            chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr)
+        except Exception:
+            return None
+    if chroma is None or chroma.shape[1] < 2:
+        return None
+
+    # Computa frames por janela
+    chroma_frame_rate = sr / 512.0  # hop_length=512 padrão do librosa
+    frames_per_window = int(KEY_WINDOW_SEC * chroma_frame_rate)
+    total_frames = chroma.shape[1]
+    n_windows = max(1, total_frames // frames_per_window)
+
+    if n_windows < MIN_WINDOWS_FOR_CONSENSUS:
+        return None
+
+    # RMS por janela para peso de energia harmônica
+    samples_per_window = int(KEY_WINDOW_SEC * sr)
+    per_window: List[Dict[str, Any]] = []
+
+    for w in range(n_windows):
+        c_start = w * frames_per_window
+        c_end = min(c_start + frames_per_window, total_frames)
+        if c_end - c_start < 10:  # janela muito pequena
+            continue
+
+        # Energia harmônica da janela (peso)
+        s_start = w * samples_per_window
+        s_end = min(s_start + samples_per_window, len(y_harm))
+        if s_end <= s_start:
+            continue
+        seg = y_harm[s_start:s_end]
+        rms = float(np.sqrt(np.mean(seg ** 2))) if seg.size > 0 else 0.0
+        if rms < 1e-4:
+            continue  # silêncio: pula janela
+
+        # Chroma médio da janela
+        chroma_mean = np.mean(chroma[:, c_start:c_end], axis=1)
+        if np.allclose(chroma_mean, 0, atol=1e-6):
+            continue
+        std = float(np.std(chroma_mean))
+        if std < 1e-3:
+            continue  # ambíguo demais
+
+        # Correlaciona com 24 perfis
+        best_c = -2.0
+        second_c = -2.0
+        best_k = None
+        best_m = None
+        for shift in range(12):
+            pm = np.roll(KRUMHANSL_MAJOR, shift)
+            cm = _pearson_corr(chroma_mean, pm)
+            if cm > best_c:
+                second_c = best_c
+                best_c = cm
+                best_k = KEYS_SHARP[shift]
+                best_m = "major"
+            elif cm > second_c:
+                second_c = cm
+            pn = np.roll(KRUMHANSL_MINOR, shift)
+            cn = _pearson_corr(chroma_mean, pn)
+            if cn > best_c:
+                second_c = best_c
+                best_c = cn
+                best_k = KEYS_SHARP[shift]
+                best_m = "minor"
+            elif cn > second_c:
+                second_c = cn
+
+        if best_k is None:
+            continue
+
+        margin = best_c - second_c if second_c > -2 else 0.0
+        per_window.append({
+            "key": best_k,
+            "mode": best_m,
+            "score": best_c,
+            "margin": margin,
+            "energy": rms,
+        })
+
+    if len(per_window) < MIN_WINDOWS_FOR_CONSENSUS:
+        return None
+
+    # Consenso: conta votos ponderados por energia
+    votes: Dict[Tuple[str, str], float] = {}
+    for pw in per_window:
+        k = (pw["key"], pw["mode"])
+        votes[k] = votes.get(k, 0.0) + pw["energy"] * (1.0 + pw["margin"])
+
+    # Best por votos ponderados
+    best_vote = max(votes.values())
+    best_key_mode = max(votes, key=votes.get)
+    total_votes = sum(votes.values())
+    agreement = best_vote / total_votes if total_votes > 0 else 0.0
+
+    # Conta janelas que concordam com o vencedor
+    agreeing = sum(1 for pw in per_window
+                   if (pw["key"], pw["mode"]) == best_key_mode)
+    agreement_count = agreeing / len(per_window)
+
+    # Margem média das janelas vencedoras
+    margins_winner = [pw["margin"] for pw in per_window
+                     if (pw["key"], pw["mode"]) == best_key_mode]
+    mean_margin = float(np.mean(margins_winner)) if margins_winner else 0.0
+
+    return {
+        "best_key": best_key_mode[0],
+        "best_mode": best_key_mode[1],
+        "agreement": agreement_count,
+        "agreement_weighted": agreement,
+        "margin": mean_margin,
+        "windows_total": n_windows,
+        "windows_valid": len(per_window),
+        "energy_mean": float(np.mean([p["energy"] for p in per_window])),
+        "per_window": per_window,
+    }
+
+
+def _window_bpm_analysis(y: np.ndarray, sr: int,
+                         onset: Optional[np.ndarray] = None,
+                         base_bpm: Optional[float] = None
+                         ) -> Optional[Dict[str, Any]]:
+    """Análise de BPM por janelas com mediana robusta e estabilidade real.
+
+    Returns:
+        Dict com keys: local_bpms, median, mad, std, agreement, stability,
+        windows_total, windows_valid, half_double_resolved
+        ou None se insuficiente.
+    """
+    try:
+        import librosa
+    except Exception:
+        return None
+
+    duration = float(len(y)) / sr
+    if duration < MIN_DURATION_FOR_WINDOWS or base_bpm is None:
+        return None
+
+    # Reusa onset envelope se disponível
+    if onset is None:
+        try:
+            import librosa
+            y_perc_tmp = librosa.effects.hpss(y)[1]
+            onset = librosa.onset.onset_strength(y=y_perc_tmp, sr=sr)
+        except Exception:
+            return None
+    if onset is None or onset.size < 10:
+        return None
+
+    # Janelas no domínio do onset envelope
+    hop = 512
+    onset_frame_rate = sr / hop
+    frames_per_window = int(BPM_WINDOW_SEC * onset_frame_rate)
+    total_frames = onset.size
+    n_windows = max(1, total_frames // frames_per_window)
+
+    if n_windows < MIN_WINDOWS_FOR_CONSENSUS:
+        return None
+
+    local_bpms: List[float] = []
+
+    for w in range(n_windows):
+        start = w * frames_per_window
+        end = min(start + frames_per_window, total_frames)
+        if end - start < 20:
+            continue
+
+        # Energia da janela
+        seg_energy = float(np.sqrt(np.mean(onset[start:end] ** 2)))
+        if seg_energy < 1e-4:
+            continue  # silêncio
+
+        # Beat tracking local
+        try:
+            local_onset = onset[start:end]
+            tempo_local, _ = librosa.beat.beat_track(
+                onset_envelope=local_onset, sr=sr)
+            if isinstance(tempo_local, np.ndarray):
+                if tempo_local.size > 0:
+                    tempo_local = float(tempo_local[0])
+                else:
+                    continue
+            else:
+                tempo_local = float(tempo_local)
+        except Exception:
+            continue
+
+        if not np.isfinite(tempo_local) or tempo_local <= 0:
+            continue
+
+        # Normaliza half/double para comparar com base_bpm
+        # Se local BPM está muito longe do base, tenta /2 ou *2
+        ratio = tempo_local / base_bpm
+        if ratio > 1.8:
+            tempo_local /= 2.0
+        elif ratio < 0.55:
+            tempo_local *= 2.0
+
+        # Só aceita se estiver razoavelmente perto do base
+        if abs(tempo_local - base_bpm) / base_bpm > 0.25:
+            continue  # outlier
+
+        local_bpms.append(tempo_local)
+
+    if len(local_bpms) < MIN_WINDOWS_FOR_CONSENSUS:
+        return None
+
+    arr = np.array(local_bpms)
+    median_bpm = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - median_bpm)))
+    std = float(np.std(arr))
+
+    # Coeficiente de variação robusto (baseado em MAD)
+    cv = mad / median_bpm if median_bpm > 0 else float('inf')
+
+    # Agreement: fração de janelas dentro de 1% do valor mediano
+    within_1pct = float(np.sum(np.abs(arr - median_bpm) / median_bpm < 0.01)) / len(arr)
+
+    # Stability: baseada em MAD e agreement
+    # conf = clip(1 - cv * K, 0, 1) * agreement_boost
+    # K=20: MAD de 0.5% do BPM → cv=0.005 → 1-0.1=0.9
+    # K=50: mais sensível
+    stability = 1.0 - min(1.0, cv * 50.0)
+    stability *= (0.5 + 0.5 * within_1pct)  # boost por agreement
+    stability = float(np.clip(stability, 0.0, 1.0))
+
+    # 100% somente se critérios estritos
+    # cv < 0.002 (MAD < 0.2% do BPM), agreement >= 0.98, >= 5 janelas
+    if cv < 0.002 and within_1pct >= 0.98 and len(local_bpms) >= 5:
+        stability = 1.0
+
+    return {
+        "local_bpms": [round(b, 2) for b in local_bpms],
+        "median": round(median_bpm, 2),
+        "mad": round(mad, 3),
+        "std": round(std, 3),
+        "cv": round(cv, 5),
+        "agreement": round(within_1pct, 3),
+        "stability": stability,
+        "windows_total": n_windows,
+        "windows_valid": len(local_bpms),
+    }
+
+
+def _resolve_half_double_bpm(base_bpm: float, local_analysis: Optional[Dict],
+                             onset: np.ndarray, sr: int) -> Tuple[float, str]:
+    """Resolve ambiguidade half/double tempo usando periodicidade de acentos.
+
+    Compara BPM vs BPM/2 vs BPM*2 contra padrão de acentos no onset envelope.
+    Retorna (bpm_resolvido, metodo_escolhido).
+    """
+    if local_analysis is None or onset is None or onset.size < 20:
+        return base_bpm, "global"
+
+    try:
+        import librosa
+        candidates = [base_bpm, base_bpm / 2.0, base_bpm * 2.0]
+        candidates = [c for c in candidates if 30 <= c <= 300]
+        if len(candidates) <= 1:
+            return base_bpm, "global"
+
+        # Para cada candidato, mede regularidade do beat grid teórico
+        best_score = -1.0
+        best_bpm = base_bpm
+        for bpm_c in candidates:
+            beat_period = 60.0 / bpm_c
+            # Converte para frames do onset envelope
+            beat_frames = beat_period * sr / 512.0
+            if beat_frames < 2 or beat_frames > onset.size:
+                continue
+            # Mede energia em posições de beat
+            n_beats = int(onset.size / beat_frames)
+            if n_beats < 4:
+                continue
+            beat_positions = np.arange(n_beats) * beat_frames
+            beat_energies = []
+            for pos in beat_positions:
+                idx = int(pos)
+                window = onset[max(0, idx-2):idx+3]
+                if window.size > 0:
+                    beat_energies.append(float(np.max(window)))
+            if not beat_energies:
+                continue
+            # Score: média de energia nos beats vs fora dos beats
+            beat_mean = float(np.mean(beat_energies))
+            # Amostra posições fora dos beats
+            non_beat_energies = []
+            for i in range(0, onset.size, max(1, int(beat_frames))):
+                if all(abs(i - pos) > 3 for pos in beat_positions):
+                    non_beat_energies.append(float(onset[i]))
+            non_beat_mean = float(np.mean(non_beat_energies)) if non_beat_energies else 0.0
+            # Score alto se beats têm mais energia que não-beats
+            score = beat_mean / (beat_mean + non_beat_mean + 1e-9)
+            if score > best_score:
+                best_score = score
+                best_bpm = bpm_c
+
+        method = "global"
+        if abs(best_bpm - base_bpm) > 0.5:
+            if best_bpm < base_bpm:
+                method = "half_resolved"
+            else:
+                method = "double_resolved"
+        return best_bpm, method
+    except Exception:
+        return base_bpm, "global"
+
+
+# ---------------------------------------------------------------------------
 # Estimativa de BPM
 # ---------------------------------------------------------------------------
 
-def _estimate_bpm(y: np.ndarray, sr: int) -> Tuple[Optional[float], Optional[float], Optional[np.ndarray]]:
+def _estimate_bpm(y: np.ndarray, sr: int,
+                   y_perc: Optional[np.ndarray] = None,
+                   onset_env: Optional[np.ndarray] = None
+                   ) -> Tuple[Optional[float], Optional[float], Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Estima BPM usando:
       - HPSS para extrair componente percussiva (quando benéfico)
       - onset_strength + beat_track
 
-    Retorna (bpm, bpm_confidence, beats_frames)
+    PERFORMANCE: aceita y_perc e onset_env pré-computados para evitar
+    HPSS e onset_strength redundantes. Se não fornecidos, computa internamente
+    (comportamento original preservado para chamadores externos).
+
+    Retorna (bpm, bpm_confidence, beats_frames, onset_envelope)
+    Nota: onset_envelope é retornado para reuso pela análise de janelas.
 
     bpm_confidence — heurística documentada:
       - baseada na regularidade dos intervalos entre beats (coeficiente de variação)
@@ -282,41 +679,49 @@ def _estimate_bpm(y: np.ndarray, sr: int) -> Tuple[Optional[float], Optional[flo
         import librosa
     except Exception as e:
         logger.error(f"librosa não disponível para BPM: {e}")
-        return None, None, None
+        return None, None, None, None
 
     if y is None or y.size == 0:
-        return None, 0.0, None
+        return None, 0.0, None, None
 
     # Verifica energia/silêncio
     try:
         rms = float(np.sqrt(np.mean(np.square(y))))
         if rms < 1e-4:  # silêncio
             logger.info("Áudio com energia muito baixa (silêncio) — BPM inconclusivo")
-            return None, 0.0, None
+            return None, 0.0, None, None
     except Exception:
         pass
 
     # Tenta HPSS para percussivo (benéfico para BPM)
-    y_perc = y
-    try:
-        # HPSS pode falhar em sinais muito curtos; fallback para y
-        y_harm, y_perc_tmp = librosa.effects.hpss(y)
-        # Se percussivo tem energia razoável, usa; senão mantém original
-        if y_perc_tmp is not None and np.size(y_perc_tmp) > 0:
-            # Verifica se não é tudo zero
-            if float(np.mean(np.abs(y_perc_tmp))) > 1e-6:
-                y_perc = y_perc_tmp
-    except Exception as e:
-        logger.debug(f"HPSS percussivo falhou, usando sinal original para BPM: {e}")
+    # PERFORMANCE: se y_perc já foi computado pelo caller (analyze_music),
+    # reutiliza — evita HPSS redundante (~15s para áudio de 3min)
+    if y_perc is not None and np.size(y_perc) > 0:
+        pass  # Usa o pré-computado
+    else:
         y_perc = y
+        try:
+            # HPSS pode falhar em sinais muito curtos; fallback para y
+            y_harm, y_perc_tmp = librosa.effects.hpss(y)
+            # Se percussivo tem energia razoável, usa; senão mantém original
+            if y_perc_tmp is not None and np.size(y_perc_tmp) > 0:
+                # Verifica se não é tudo zero
+                if float(np.mean(np.abs(y_perc_tmp))) > 1e-6:
+                    y_perc = y_perc_tmp
+        except Exception as e:
+            logger.debug(f"HPSS percussivo falhou, usando sinal original para BPM: {e}")
+            y_perc = y
 
-    # Calcula onset strength
+    # Calcula onset strength — PERFORMANCE: reusa onset_env se fornecido
     onset = None
-    try:
-        onset = librosa.onset.onset_strength(y=y_perc, sr=sr)
-    except Exception as e:
-        logger.debug(f"onset_strength falhou: {e}")
-        onset = None
+    if onset_env is not None and np.size(onset_env) > 0:
+        onset = onset_env
+    else:
+        try:
+            onset = librosa.onset.onset_strength(y=y_perc, sr=sr)
+        except Exception as e:
+            logger.debug(f"onset_strength falhou: {e}")
+            onset = None
 
     # Beat tracking
     tempo = None
@@ -328,7 +733,7 @@ def _estimate_bpm(y: np.ndarray, sr: int) -> Tuple[Optional[float], Optional[flo
             tempo, beats = librosa.beat.beat_track(y=y_perc, sr=sr)
     except Exception as e:
         logger.warning(f"beat_track falhou: {e}")
-        return None, 0.0, None
+        return None, 0.0, None, None
 
     # Normaliza tempo (librosa 0.11 retorna array)
     try:
@@ -398,7 +803,7 @@ def _estimate_bpm(y: np.ndarray, sr: int) -> Tuple[Optional[float], Optional[flo
     if bpm_confidence is not None:
         bpm_confidence = float(np.clip(bpm_confidence, 0.0, 1.0))
 
-    return bpm, bpm_confidence, beats
+    return bpm, bpm_confidence, beats, onset
 
 
 # ---------------------------------------------------------------------------
@@ -562,14 +967,20 @@ def _estimate_key(y_harm: np.ndarray, sr: int) -> Tuple[Optional[str], Optional[
 def analyze_music(
     input_path: Path,
     duration_probe: Optional[float] = None,
+    file_id: Optional[str] = None,
 ) -> MusicAnalysisResult:
     """
     Analisa arquivo de áudio original e retorna MusicAnalysisResult.
 
+    ETAPA 8.3 — CACHE PERSISTENTE:
+    Se file_id for fornecido, verifica cache antes de computar.
+    Cache hit: retorna imediatamente (não roda librosa/HPSS/chroma/beat_track).
+    Cache miss: computa normalmente e salva resultado no cache.
+
     - Decodifica via FFmpeg para WAV mono 22050
     - Carrega com librosa
-    - Estima BPM + confiança
-    - Estima tonalidade + confiança
+    - Estima BPM + confiança (global + janelas)
+    - Estima tonalidade + confiança (global + janelas)
 
     Garante limpeza de WAV temporário inclusive em exceção (try/finally).
     Nunca lança exceção para o caller principal (app.py) — retorna Result com error/warning
@@ -579,6 +990,50 @@ def analyze_music(
     mas tenta analisar mesmo assim (não quebra).
     """
     result = MusicAnalysisResult()
+
+    # ------------------------------------------------------------------
+    # ETAPA 8.3 — CACHE PERSISTENTE: verifica antes de computar
+    # ------------------------------------------------------------------
+    if file_id:
+        try:
+            from backend.audio.analysis_cache import (
+                get_cached_analysis, save_analysis_cache, result_to_cache_dict,
+            )
+            from backend.audio.long_audio import compute_audio_hash
+
+            audio_hash = compute_audio_hash(Path(input_path))
+            if audio_hash:
+                cached = get_cached_analysis(file_id, audio_hash)
+                if cached is not None:
+                    # CACHE HIT: reconstrói MusicAnalysisResult do dict
+                    logger.info(f"Analysis CACHE HIT file_id={file_id}")
+                    result.bpm = cached.get("bpm")
+                    result.bpm_rounded = cached.get("bpm_rounded")
+                    result.bpm_confidence = cached.get("bpm_confidence")
+                    result.key = cached.get("key")
+                    result.mode = cached.get("mode")
+                    result.key_confidence = cached.get("key_confidence")
+                    result.duration_analyzed = cached.get("duration")
+                    result.first_beat_time = cached.get("first_beat_time")
+                    result.beats_count = cached.get("beats_count")
+                    result.bpm_stability = cached.get("bpm_stability")
+                    result.bpm_local_median = cached.get("bpm_local_median")
+                    result.bpm_local_mad = cached.get("bpm_local_mad")
+                    result.bpm_window_agreement = cached.get("bpm_window_agreement")
+                    result.bpm_windows_valid = cached.get("bpm_windows_valid")
+                    result.bpm_half_double_method = cached.get("bpm_half_double_method")
+                    result.beat_grid_mean_error_ms = cached.get("beat_grid_mean_error_ms")
+                    result.beat_grid_p95_error_ms = cached.get("beat_grid_p95_error_ms")
+                    result.key_window_agreement = cached.get("key_window_agreement")
+                    result.key_score_margin = cached.get("key_score_margin")
+                    result.key_windows_valid = cached.get("key_windows_valid")
+                    result.key_method_agreement = cached.get("key_method_agreement")
+                    result.key_analysis_used = cached.get("key_analysis_used")
+                    if cached.get("warning"):
+                        result.warning = cached["warning"]
+                    return result
+        except Exception as e:
+            logger.debug(f"Analysis cache check falhou (não crítico): {e}")
 
     # Valida duração mínima via probe se disponível
     if duration_probe is not None and duration_probe < MIN_DURATION_FOR_MUSIC:
@@ -643,8 +1098,48 @@ def analyze_music(
         # Performance: para arquivos >10 min (~13M samples) ainda é ok em RAM (~50MB)
         # Não cortamos arbitrariamente; se necessário, futuro poderá limitar a 180s com aviso.
 
-        # 3. BPM — usa percussivo via HPSS quando útil
-        bpm, bpm_conf, beats = _estimate_bpm(y, sr)
+        # 3+4. BPM e Tonalidade — PERFORMANCE: UMA chamada HPSS para ambos.
+        # Antes: _estimate_bpm fazia HPSS #1, depois analyze_music fazia HPSS #2
+        #        para key, e get_beat_grid (separado) fazia HPSS #3.
+        #        Total: 3 HPSS = ~45s para áudio de 3min. Agora: 1 HPSS = ~15s.
+        # Os componentes y_harm/y_perc são idênticos aos que HPSS produzia
+        # separadamente — mesma função, mesmos parâmetros, qualidade igual.
+        y_harm = y
+        y_perc_ss = y  # fallback: sinal original se HPSS falhar
+        hpss_ok = False
+        try:
+            y_harm_tmp, y_perc_tmp = librosa.effects.hpss(y)
+            if y_harm_tmp is not None and np.size(y_harm_tmp) > 0:
+                if float(np.mean(np.abs(y_harm_tmp))) > 1e-6:
+                    y_harm = y_harm_tmp
+                hpss_ok = True
+            if y_perc_tmp is not None and np.size(y_perc_tmp) > 0:
+                if float(np.mean(np.abs(y_perc_tmp))) > 1e-6:
+                    y_perc_ss = y_perc_tmp
+        except Exception as e:
+            logger.debug(f"HPSS falhou, usando sinal original: {e}")
+            y_harm = y
+            y_perc_ss = y
+
+        # ------------------------------------------------------------------
+        # PRECISÃO AVANÇADA — Onset envelope computado UMA VEZ para todo o pipeline.
+        # Reusado por: _estimate_bpm, _window_bpm_analysis, _resolve_half_double.
+        # PERFORMANCE: antes era computado 2x (dentro de _estimate_bpm + aqui).
+        # ------------------------------------------------------------------
+        onset_env_shared: Optional[np.ndarray] = None
+        if duration_analyzed is not None and duration_analyzed >= MIN_DURATION_FOR_WINDOWS:
+            try:
+                onset_env_shared = librosa.onset.onset_strength(y=y_perc_ss, sr=sr)
+            except Exception:
+                onset_env_shared = None
+
+        # 3. BPM — usa y_perc e onset_env do HPSS compartilhado (não recalcula)
+        bpm, bpm_conf, beats, onset_returned = _estimate_bpm(
+            y, sr, y_perc=y_perc_ss if hpss_ok else None,
+            onset_env=onset_env_shared)
+        # Se onset_env não foi computado acima (áudio curto), usa o retornado
+        if onset_env_shared is None and onset_returned is not None:
+            onset_env_shared = onset_returned
         result.bpm = bpm
         result.bpm_rounded = int(round(bpm)) if bpm is not None else None
         result.bpm_confidence = bpm_conf
@@ -653,22 +1148,158 @@ def analyze_music(
                 result.beats_count = int(len(beats))
             except Exception:
                 result.beats_count = None
+            # PERFORMANCE: extrai first_beat_time do beat_track já computado.
+            # Elimina get_beat_grid() separado (que re-decodificava + HPSS #3).
+            try:
+                if len(beats) > 0:
+                    result.first_beat_time = float(
+                        librosa.frames_to_time(int(beats[0]), sr=sr))
+            except Exception:
+                result.first_beat_time = None
 
-        # 4. Tonalidade — usa harmônico via HPSS quando útil
-        y_harm = y
-        try:
-            # Tenta separar harmônico; se falhar, usa y
-            y_harm_tmp, _ = librosa.effects.hpss(y)
-            if y_harm_tmp is not None and np.size(y_harm_tmp) > 0 and float(np.mean(np.abs(y_harm_tmp))) > 1e-6:
-                y_harm = y_harm_tmp
-        except Exception as e:
-            logger.debug(f"HPSS harmônico falhou, usando sinal original para tonalidade: {e}")
-            y_harm = y
+        # ------------------------------------------------------------------
+        # PRECISÃO AVANÇADA — BPM por janelas (para áudio >= 30s)
+        # Onset envelope JÁ computado acima — reusado, não recalculado.
+        # ------------------------------------------------------------------
+        if bpm is not None and duration_analyzed is not None and duration_analyzed >= MIN_DURATION_FOR_WINDOWS:
+            try:
+                onset_env = onset_env_shared  # reusa o compartilhado
 
+                # Análise por janelas: BPM local em cada segmento
+                bpm_window_data = _window_bpm_analysis(
+                    y, sr, onset=onset_env, base_bpm=bpm)
+
+                if bpm_window_data is not None:
+                    result.bpm_local_median = bpm_window_data["median"]
+                    result.bpm_local_mad = bpm_window_data["mad"]
+                    result.bpm_window_agreement = bpm_window_data["agreement"]
+                    result.bpm_stability = bpm_window_data["stability"]
+                    result.bpm_windows_valid = bpm_window_data["windows_valid"]
+
+                    # Resolve half/double tempo se detectado
+                    bpm_resolved, hd_method = _resolve_half_double_bpm(
+                        bpm, bpm_window_data, onset_env, sr)
+                    if hd_method != "global" and abs(bpm_resolved - bpm) > 1.0:
+                        result.bpm_half_double_method = hd_method
+                        bpm = bpm_resolved
+                        result.bpm = bpm
+                        result.bpm_rounded = int(round(bpm))
+
+                    # Se mediana local está muito perto do global, usa mediana (mais precisa)
+                    if abs(bpm_window_data["median"] - bpm) / bpm < 0.05:
+                        bpm = bpm_window_data["median"]
+                        result.bpm = bpm
+                        result.bpm_rounded = int(round(bpm))
+
+                    # Beat grid error: mede desvio dos beats reais vs grid teórico
+                    if beats is not None and len(beats) >= 4:
+                        try:
+                            beat_times = librosa.frames_to_time(beats, sr=sr)
+                            beat_period = 60.0 / bpm
+                            # Grid teórico a partir do primeiro beat
+                            if result.first_beat_time is not None:
+                                t0 = result.first_beat_time
+                                theoretical = np.arange(t0, beat_times[-1] + beat_period, beat_period)
+                                # Para cada beat real, distância ao beat teórico mais próximo
+                                errors = []
+                                for bt in beat_times:
+                                    idx = int(round((bt - t0) / beat_period))
+                                    if 0 <= idx < len(theoretical):
+                                        err = (bt - theoretical[idx]) * 1000.0  # ms
+                                        errors.append(abs(err))
+                                if errors:
+                                    errors_arr = np.array(errors)
+                                    result.beat_grid_mean_error_ms = round(float(np.mean(errors_arr)), 1)
+                                    result.beat_grid_p95_error_ms = round(
+                                        float(np.percentile(errors_arr, 95)), 1)
+                        except Exception as e:
+                            logger.debug(f"beat_grid_error falhou: {e}")
+
+                    # Atualiza bpm_confidence com estabilidade real das janelas
+                    if result.bpm_stability is not None:
+                        # Combina confiança global com estabilidade por janelas
+                        # Estabilidade real domina quando há dados suficientes
+                        if result.bpm_windows_valid and result.bpm_windows_valid >= 3:
+                            if result.bpm_stability >= 0.98:
+                                # Janelas muito concordantes → alta confiança
+                                # 1.0 SOMENTE se: stability=1.0, agreement alto, MAD muito baixo
+                                if (result.bpm_stability == 1.0
+                                        and result.bpm_window_agreement is not None
+                                        and result.bpm_window_agreement >= 0.98
+                                        and result.bpm_local_mad is not None
+                                        and result.bpm_local_mad < 0.3):
+                                    bpm_conf = 1.0
+                                else:
+                                    bpm_conf = max(bpm_conf or 0, result.bpm_stability * 0.98)
+                            else:
+                                # Estabilidade menor → usa valor real
+                                bpm_conf = min(bpm_conf or 0, result.bpm_stability)
+                            result.bpm_confidence = round(float(np.clip(bpm_conf, 0, 1)), 4)
+            except Exception as e:
+                logger.debug(f"Window BPM analysis falhou (não crítico): {e}")
+
+        # 4. Tonalidade — usa y_harm do HPSS compartilhado (não faz HPSS novamente)
         key, mode, key_conf, best_corr = _estimate_key(y_harm, sr)
         result.key = key
         result.mode = mode
         result.key_confidence = key_conf
+
+        # ------------------------------------------------------------------
+        # PRECISÃO AVANÇADA — Key por janelas (para áudio >= 30s)
+        # Consenso entre janelas ponderado por energia harmônica.
+        # ------------------------------------------------------------------
+        if duration_analyzed is not None and duration_analyzed >= MIN_DURATION_FOR_WINDOWS:
+            try:
+                key_window_data = _window_key_analysis(y_harm, sr)
+                if key_window_data is not None and key_window_data["windows_valid"] >= MIN_WINDOWS_FOR_CONSENSUS:
+                    result.key_window_agreement = key_window_data["agreement"]
+                    result.key_score_margin = round(key_window_data["margin"], 4)
+                    result.key_windows_valid = key_window_data["windows_valid"]
+
+                    # Method agreement: janelas concordam com estimativa global?
+                    w_key = key_window_data["best_key"]
+                    w_mode = key_window_data["best_mode"]
+                    method_agree = 1.0 if (w_key == key and w_mode == mode) else 0.0
+                    result.key_method_agreement = method_agree
+
+                    if method_agree:
+                        # Global e janelas concordam → confidence boost
+                        result.key_analysis_used = "ensemble"
+                        agreement = key_window_data["agreement"]
+                        margin = key_window_data["margin"]
+
+                        # Formula: base_conf (global) + window_consensus boost
+                        # window_conf = agreement * quality_of_each_window
+                        window_conf = agreement * (0.5 + 0.5 * min(1.0, margin * 8))
+
+                        # 100% somente se TODOS os critérios estritos:
+                        # agreement >= 98%, margin >= 0.05, method_agree == 1, energia ok
+                        if (agreement >= 0.98 and margin >= 0.05
+                                and key_window_data["energy_mean"] > 0.001):
+                            key_conf = 1.0
+                        else:
+                            # Combina global + janelas (weighted)
+                            key_conf = min(1.0, (key_conf or 0) * 0.35 + window_conf * 0.65)
+                    else:
+                        # Global e janelas DISCORDAM → usa janelas se consenso forte
+                        result.key_analysis_used = "windows_override"
+                        agreement = key_window_data["agreement"]
+                        if agreement >= 0.75 and key_window_data["windows_valid"] >= 5:
+                            # Janelas têm consenso forte — usa resultado das janelas
+                            key = w_key
+                            mode = w_mode
+                            result.key = key
+                            result.mode = mode
+                            window_conf = agreement * (0.5 + 0.5 * min(1.0, key_window_data["margin"] * 8))
+                            key_conf = min(0.95, window_conf * 0.85)
+                        else:
+                            # Discordância sem consenso claro → reduz confidence
+                            result.key_analysis_used = "ambiguous"
+                            key_conf = (key_conf or 0) * 0.4
+
+                    result.key_confidence = round(float(np.clip(key_conf, 0, 1)), 4)
+            except Exception as e:
+                logger.debug(f"Window key analysis falhou (não crítico): {e}")
 
         # Ajusta warnings para baixa confiança / ambiguidade
         warnings: List[str] = []
@@ -706,6 +1337,25 @@ def analyze_music(
 
         # Se ambos inconclusivos mas sem erro técnico, não considera erro, apenas warning
         # error permanece None salvo falha técnica acima
+
+        # ------------------------------------------------------------------
+        # ETAPA 8.3 — CACHE PERSISTENTE: salva resultado após computar
+        # ------------------------------------------------------------------
+        if file_id and not result.error:
+            try:
+                from backend.audio.analysis_cache import (
+                    save_analysis_cache, result_to_cache_dict,
+                )
+                from backend.audio.long_audio import compute_audio_hash
+
+                audio_hash = compute_audio_hash(Path(input_path))
+                if audio_hash:
+                    cache_dict = result_to_cache_dict(result)
+                    saved = save_analysis_cache(file_id, audio_hash, cache_dict)
+                    if saved:
+                        logger.info(f"Analysis CACHE SAVED file_id={file_id}")
+            except Exception as e:
+                logger.debug(f"Analysis cache save falhou (não crítico): {e}")
 
         return result
 

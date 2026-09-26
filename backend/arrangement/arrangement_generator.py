@@ -53,16 +53,24 @@ def get_arrangement_paths(file_id: str) -> Tuple[Path, Path]:
     )
 
 
+from backend.arrangement.styles import validate_style
+
 def arrangement_config_key(instruments: List[str], mode: str, include_originals: bool,
-                           cleanup_profile: str = "natural") -> str:
-    raw = f"{','.join(sorted(instruments))}|{mode}|{int(bool(include_originals))}|{cleanup_profile}"
+                           cleanup_profile: str = "natural",
+                           arrangement_style: str = "automatic",
+                           include_drums: bool = True,
+                           dynamics: str = "automatic") -> str:
+    raw = (f"{','.join(sorted(instruments))}|{mode}|{int(bool(include_originals))}|"
+           f"{cleanup_profile}|{arrangement_style}|{int(bool(include_drums))}|{dynamics}")
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def validate_arrange_config(
     instruments: Any, mode: Any = "automatic", include_original_parts: Any = True,
+    arrangement_style: Any = "automatic", include_drums: Any = True,
+    dynamics: Any = "automatic",
 ) -> Dict[str, Any]:
-    """Valida seleção (allowlist, 1..5) e modo. Lança ValueError."""
+    """Valida seleção (allowlist, 1..5), modo, estilo, bateria e dinâmica."""
     if not isinstance(instruments, list) or not instruments:
         raise ValueError("Selecione ao menos 1 instrumento.")
     seen, clean = set(), []
@@ -76,8 +84,13 @@ def validate_arrange_config(
         raise ValueError(f"Máximo de {MAX_ARRANGEMENT_INSTRUMENTS} instrumentos.")
     if mode not in SUPPORTED_ARRANGE_MODES:
         raise ValueError(f"mode inválido. Permitidos: {', '.join(SUPPORTED_ARRANGE_MODES)}.")
+    style = validate_style(arrangement_style)
+    if dynamics not in ("automatic", "none"):
+        raise ValueError("dynamics inválido. Permitidos: automatic, none.")
     return {"instruments": clean, "mode": mode,
-            "include_original_parts": bool(include_original_parts)}
+            "include_original_parts": bool(include_original_parts),
+            "arrangement_style": style, "include_drums": bool(include_drums),
+            "dynamics": dynamics}
 
 
 def read_base_score(file_id: str) -> Optional[Dict[str, Any]]:
@@ -134,6 +147,8 @@ def _build_arrange_command(
     python_path: str, file_id: str, base: Dict[str, Any],
     instruments: List[str], mode: str, include_originals: bool,
     output_musicxml: Path, output_model: Path, cleanup_profile: str = "natural",
+    arrangement_style: str = "automatic", include_drums: bool = True,
+    dynamics: str = "automatic",
 ) -> List[str]:
     from backend.audio.transcriber import TRANSCRIPTIONS_DIR
     cmd = [
@@ -161,6 +176,14 @@ def _build_arrange_command(
         cmd.append("--include-original-parts")
     cmd.extend(["--base-config-key", str(base.get("config_key", ""))])
     cmd.extend(["--cleanup-profile", cleanup_profile])
+    cmd.extend(["--arrangement-style", arrangement_style])
+    cmd.extend(["--dynamics", dynamics])
+    if include_drums:
+        cmd.append("--include-drums")
+    cmd.extend(["--arrangement-style", arrangement_style])
+    cmd.extend(["--dynamics", dynamics])
+    if include_drums:
+        cmd.append("--include-drums")
     logger.info(f"Arrange comando: {[repr(c) for c in cmd]}")
     return cmd
 
@@ -183,20 +206,25 @@ def _run_arrange_sync(cmd: List[str], timeout: int = ARRANGE_TIMEOUT) -> Tuple[i
 async def generate_arrangement_async(
     file_id: str, instruments: List[str], mode: str = "automatic",
     include_original_parts: bool = True, cleanup_profile: str = "natural",
-    timeout: int = ARRANGE_TIMEOUT,
+    arrangement_style: str = "automatic", include_drums: bool = True,
+    dynamics: str = "automatic", timeout: int = ARRANGE_TIMEOUT,
 ) -> Dict[str, Any]:
     """Gera arrangement.musicxml + arrangement.json (idempotente por config)."""
     if not _validate_file_id(file_id):
         raise ValueError("file_id inválido.")
     from backend.musical.cleanup import validate_cleanup_profile
     profile = validate_cleanup_profile(cleanup_profile)
-    cfg = validate_arrange_config(instruments, mode, include_original_parts)
+    cfg = validate_arrange_config(instruments, mode, include_original_parts,
+                                  arrangement_style, include_drums, dynamics)
     base = read_base_score(file_id)
     if not base:
         raise FileNotFoundError("Gere a partitura base antes de criar o arranjo.")
     xml_p, model_p = get_arrangement_paths(file_id)
     ck = arrangement_config_key(cfg["instruments"], cfg["mode"],
-                                cfg["include_original_parts"], cleanup_profile=profile)
+                                cfg["include_original_parts"], cleanup_profile=profile,
+                                arrangement_style=cfg["arrangement_style"],
+                                include_drums=cfg["include_drums"],
+                                dynamics=cfg["dynamics"])
     base_ck = str(base.get("config_key", ""))
     if model_p.is_file() and xml_p.is_file():
         try:
@@ -226,7 +254,8 @@ async def generate_arrangement_async(
                 pass
     cmd = _build_arrange_command(py, file_id, base, cfg["instruments"],
                                  cfg["mode"], cfg["include_original_parts"], xml_p, model_p,
-                                 profile)
+                                 profile, cfg["arrangement_style"],
+                                 cfg["include_drums"], cfg["dynamics"])
     try:
         loop = asyncio.get_running_loop()
         logger.info(f"Event loop arrange: type={type(loop).__name__}")

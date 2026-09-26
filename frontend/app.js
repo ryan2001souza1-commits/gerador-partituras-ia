@@ -1,4 +1,52 @@
 document.addEventListener("DOMContentLoaded", () => {
+  // ===== MOBILE NAV TOGGLE (redesign) =====
+  const navToggle = document.getElementById("nav-toggle");
+  const mainNav = document.getElementById("main-nav");
+  if (navToggle && mainNav) {
+    navToggle.addEventListener("click", () => {
+      mainNav.classList.toggle("open");
+    });
+    // Fecha menu ao clicar em link
+    mainNav.querySelectorAll("a").forEach(a => {
+      a.addEventListener("click", () => {
+        mainNav.classList.remove("open");
+      });
+    });
+  }
+
+  // ===== CHIP STATE (instrumentos selecionados) =====
+  document.querySelectorAll("#arrange-instruments input[type=checkbox]").forEach(cb => {
+    const updateChip = () => {
+      const chip = cb.closest(".chip");
+      if (chip) {
+        if (cb.checked) chip.classList.add("checked");
+        else chip.classList.remove("checked");
+      }
+    };
+    cb.addEventListener("change", updateChip);
+    updateChip(); // estado inicial
+  });
+
+  // ===== EMPTY STATE OBSERVER (redesign) =====
+  const scoreEmpty = document.getElementById("score-empty-state");
+  const scoreInfoEl = document.getElementById("score-info");
+  const arrangeInfoEl = document.getElementById("arrange-info");
+  if (scoreEmpty && scoreInfoEl && arrangeInfoEl) {
+    const updateEmptyState = () => {
+      const hasScore = !scoreInfoEl.classList.contains("hidden");
+      const hasArrange = !arrangeInfoEl.classList.contains("hidden");
+      if (hasScore || hasArrange) {
+        scoreEmpty.classList.add("hidden");
+      } else {
+        scoreEmpty.classList.remove("hidden");
+      }
+    };
+    const mo = new MutationObserver(updateEmptyState);
+    mo.observe(scoreInfoEl, { attributes: true, attributeFilter: ["class"] });
+    mo.observe(arrangeInfoEl, { attributes: true, attributeFilter: ["class"] });
+    updateEmptyState();
+  }
+
   const form = document.getElementById("upload-form");
   const fileInput = document.getElementById("file-input");
   const btn = document.getElementById("btn-analisar");
@@ -41,6 +89,23 @@ document.addEventListener("DOMContentLoaded", () => {
   const ALLOWED_EXTS = [".mp3", ".wav", ".flac", ".m4a", ".ogg"];
   const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
 
+  // BUG FIX #9: cancela todos os pollings ativos ao trocar/enviar arquivo.
+  // Antes: polling de job A continuava após enviar arquivo B, causando
+  // cross-file contamination (stems de A exibidos enquanto currentFileId = B).
+  function cancelAllPolling() {
+    if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+    if (transcribePollingInterval) { clearInterval(transcribePollingInterval); transcribePollingInterval = null; }
+    if (drumsPollingInterval) { clearInterval(drumsPollingInterval); drumsPollingInterval = null; }
+    if (scorePollingInterval) { clearInterval(scorePollingInterval); scorePollingInterval = null; }
+    if (arrangePollingInterval) { clearInterval(arrangePollingInterval); arrangePollingInterval = null; }
+    if (typeof pipelinePollingInterval !== 'undefined' && pipelinePollingInterval) { clearInterval(pipelinePollingInterval); pipelinePollingInterval = null; }
+    currentJobId = null;
+    currentTranscribeJobId = null;
+    currentDrumJobId = null;
+    currentScoreJobId = null;
+    currentArrangeJobId = null;
+  }
+
   function showStatus(message, type) {
     statusEl.textContent = message;
     statusEl.className = "status visible " + type;
@@ -65,6 +130,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function hideSeparateSection() {
     if (separateSection) separateSection.classList.add("hidden");
+    if (typeof pipelineSection !== 'undefined' && pipelineSection) pipelineSection.classList.add("hidden");
+    if (typeof pipelineProgress !== 'undefined' && pipelineProgress) pipelineProgress.classList.add("hidden");
     if (separateStatus) {
       separateStatus.textContent = "";
       separateStatus.className = "status";
@@ -84,6 +151,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function showSeparateSection(fileId) {
     currentFileId = fileId;
     if (separateSection) separateSection.classList.remove("hidden");
+    if (pipelineSection) pipelineSection.classList.remove("hidden");
     // Verifica se stems já existem para exibir imediatamente
     checkExistingStems(fileId);
   }
@@ -115,8 +183,9 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
     stemsInfo.classList.remove("hidden");
-    // Após mostrar stems, mostra também a seção de transcrição
+    // Após mostrar stems, mostra também as seções de transcrição e bateria
     showTranscribeSection(fileId);
+    showDrumsSection(fileId);
   }
 
   function updateSeparateStatus(message, type) {
@@ -223,6 +292,168 @@ document.addEventListener("DOMContentLoaded", () => {
     checkExistingTranscriptions(fileId);
   }
 
+  // ---- Bateria / percussão (Etapa 8) ----
+  const drumsSection = document.getElementById("drums-section");
+  const btnDrums = document.getElementById("btn-drums");
+  const drumsStatus = document.getElementById("drums-status");
+  const drumsSummary = document.getElementById("drums-summary");
+  let drumsPollingInterval = null;
+  let currentDrumJobId = null;
+
+  function updateDrumsStatus(message, type) {
+    if (!drumsStatus) return;
+    drumsStatus.textContent = message;
+    drumsStatus.className = "status visible " + (type || "info");
+    drumsStatus.style.display = "block";
+  }
+
+  function hideDrumsSection() {
+    if (drumsSection) drumsSection.classList.add("hidden");
+    if (drumsSummary) drumsSummary.classList.add("hidden");
+    if (drumsStatus) {
+      drumsStatus.textContent = "";
+      drumsStatus.className = "status";
+      drumsStatus.style.display = "none";
+    }
+    if (btnDrums) {
+      btnDrums.disabled = false;
+      btnDrums.textContent = "Transcrever bateria";
+    }
+    if (drumsPollingInterval) {
+      clearInterval(drumsPollingInterval);
+      drumsPollingInterval = null;
+    }
+    currentDrumJobId = null;
+  }
+
+  function showDrumsSection(fileId) {
+    currentFileId = fileId;
+    if (drumsSection) drumsSection.classList.remove("hidden");
+    checkExistingDrums(fileId);
+  }
+
+  function showDrumsSummary(data) {
+    const stats = (data && data.stats) || {};
+    const set = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = String(v);
+    };
+    set("drums-kick", stats.kick_count || 0);
+    set("drums-snare", stats.snare_count || 0);
+    set("drums-hihat", (stats.closed_hihat_count || 0) + (stats.open_hihat_count || 0));
+    set("drums-cymbals", stats.crash_count || 0);
+    set("drums-toms", (stats.tom_low_count || 0) + (stats.tom_mid_count || 0) + (stats.tom_high_count || 0));
+    if (drumsSummary) drumsSummary.classList.remove("hidden");
+    const info = document.getElementById("trans-drums-info");
+    if (info && data && data.stats) {
+      const n = (data.events || []).length || 0;
+      info.textContent = `${n} hits de bateria.`;
+    }
+    // Habilita "Incluir bateria" no arranjo
+    const chk = document.getElementById("arrange-include-drums");
+    if (chk) chk.disabled = false;
+  }
+
+  async function checkExistingDrums(fileId) {
+    try {
+      const resp = await fetch(`/api/drums/${encodeURIComponent(fileId)}`);
+      const data = await resp.json().catch(() => null);
+      if (resp.ok && data && data.available) {
+        showDrumsSummary(data);
+        updateDrumsStatus("Bateria já transcrita.", "success");
+        if (btnDrums) {
+          btnDrums.textContent = "Bateria transcrita";
+          btnDrums.disabled = true;
+        }
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  async function pollDrumJob(jobId) {
+    try {
+      const resp = await fetch(`/api/drums/status/${encodeURIComponent(jobId)}`);
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data) {
+        updateDrumsStatus("Erro ao consultar status da bateria.", "error");
+        if (btnDrums) btnDrums.disabled = false;
+        clearInterval(drumsPollingInterval);
+        drumsPollingInterval = null;
+        return;
+      }
+      const status = data.status;
+      const msg = data.message || status;
+      if (status === "queued" || status === "running") {
+        updateDrumsStatus(msg || "Transcrevendo bateria...", "info");
+        if (btnDrums) btnDrums.disabled = true;
+      } else if (status === "completed") {
+        updateDrumsStatus(msg || "Concluído.", "success");
+        if (btnDrums) {
+          btnDrums.textContent = "Bateria transcrita";
+          btnDrums.disabled = true;
+        }
+        clearInterval(drumsPollingInterval);
+        drumsPollingInterval = null;
+        const model = data.results || data.drums;
+        const fid = data.file_id || currentFileId;
+        if (model && model.stats) showDrumsSummary(model);
+        else if (fid) checkExistingDrums(fid);
+      } else if (status === "failed") {
+        updateDrumsStatus(msg || "Não foi possível transcrever a bateria.", "error");
+        if (btnDrums) btnDrums.disabled = false;
+        clearInterval(drumsPollingInterval);
+        drumsPollingInterval = null;
+      }
+    } catch (e) {
+      updateDrumsStatus("Erro ao consultar status da bateria.", "error");
+    }
+  }
+
+  if (btnDrums) {
+    btnDrums.addEventListener("click", async () => {
+      if (!currentFileId) {
+        updateDrumsStatus("Nenhum arquivo analisado.", "error");
+        return;
+      }
+      btnDrums.disabled = true;
+      btnDrums.textContent = "Transcrevendo bateria...";
+      updateDrumsStatus("Preparando...", "info");
+    try {
+      const resp = await fetch(`/api/drums/${encodeURIComponent(currentFileId)}`, { method: "POST" });
+      const data = await resp.json().catch(() => null);
+      if (resp.status === 409) {
+        updateDrumsStatus((data && data.detail) || "Separe os instrumentos antes.", "error");
+        btnDrums.disabled = false;
+        btnDrums.textContent = "Transcrever bateria";
+        return;
+      }
+      if (!resp.ok || !data || !data.job_id) {
+        updateDrumsStatus((data && (data.detail || data.message)) || "Não foi possível iniciar.", "error");
+        btnDrums.disabled = false;
+        btnDrums.textContent = "Transcrever bateria";
+        return;
+      }
+      if (data.already_completed) {
+        updateDrumsStatus("Bateria já transcrita.", "success");
+        if (data.drums) showDrumsSummary(data.drums);
+        btnDrums.textContent = "Bateria transcrita";
+        btnDrums.disabled = true;
+        return;
+      }
+      currentDrumJobId = data.job_id;
+      updateDrumsStatus(data.message || "Transcrição agendada.", "info");
+      if (drumsPollingInterval) clearInterval(drumsPollingInterval);
+      drumsPollingInterval = setInterval(() => pollDrumJob(currentDrumJobId), 2000);
+      setTimeout(() => pollDrumJob(currentDrumJobId), 1000);
+    } catch (err) {
+      updateDrumsStatus("Erro ao transcrever bateria.", "error");
+      btnDrums.disabled = false;
+      btnDrums.textContent = "Transcrever bateria";
+    }
+    });
+  }
+
   function hideTranscriptionInfo() {
     if (transcriptionInfo) transcriptionInfo.classList.add("hidden");
     if (transcriptionWarning) {
@@ -322,10 +553,35 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       const status = data.status;
       const msg = data.message || status;
+      // Etapa 8.2: progresso real (percent, chunks) quando disponível
+      let progressMsg = msg;
+      if (data.progress && typeof data.progress.progress_percent === "number") {
+        const p = data.progress;
+        const pct = p.progress_percent;
+        let detail = "";
+        if (p.total_chunks > 1) {
+          detail = ` — trecho ${p.current_chunk} de ${p.total_chunks}`;
+        }
+        if (p.total_seconds > 0) {
+          const done = Math.floor(p.processed_seconds / 60) + ":" +
+            String(Math.floor(p.processed_seconds % 60)).padStart(2, "0");
+          const total = Math.floor(p.total_seconds / 60) + ":" +
+            String(Math.floor(p.total_seconds % 60)).padStart(2, "0");
+          detail += ` (${done} / ${total})`;
+        }
+        progressMsg = `${msg}${detail} — ${pct}%`;
+        // Barra de progresso via status element
+        if (transcribeStatus) {
+          transcribeStatus.textContent = progressMsg;
+          const bar = "█".repeat(Math.round(pct / 5)) + "░".repeat(20 - Math.round(pct / 5));
+          transcribeStatus.textContent = `${progressMsg}\n${bar}`;
+          transcribeStatus.style.whiteSpace = "pre";
+        }
+      }
       if (status === "queued") {
-        updateTranscribeStatus(msg || "Preparando transcrição...", "info");
+        updateTranscribeStatus(progressMsg || "Preparando transcrição...", "info");
       } else if (status === "running") {
-        updateTranscribeStatus(msg || "Transcrevendo... (pode levar vários minutos)", "info");
+        updateTranscribeStatus(progressMsg || "Transcrevendo... (pode levar vários minutos)", "info");
         if (btnTranscribe) btnTranscribe.disabled = true;
       } else if (status === "completed") {
         updateTranscribeStatus(msg || "Transcrição concluída.", "success");
@@ -524,6 +780,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Reset ao selecionar novo arquivo
   fileInput.addEventListener("change", () => {
+    // BUG FIX #9: cancela pollings de jobs de arquivo anterior
+    cancelAllPolling();
     clearStatus();
     hideAudioInfo();
     hideMusicInfo();
@@ -531,6 +789,7 @@ document.addEventListener("DOMContentLoaded", () => {
     hideStemsInfo();
     hideTranscribeSection();
     hideTranscriptionInfo();
+    hideDrumsSection();
     hideScoreSection();
     lastMusic = null;
   });
@@ -945,11 +1204,17 @@ document.addEventListener("DOMContentLoaded", () => {
         updateArrangeStatus("Selecione ao menos 1 instrumento.", "error");
         return;
       }
+      const arrangeStyle = document.getElementById("arrange-style");
+      const arrangeDrums = document.getElementById("arrange-include-drums");
+      const arrangeDynamics = document.getElementById("arrange-dynamics");
       const payload = {
         instruments: selected,
         mode: arrangeMode ? arrangeMode.value : "automatic",
         include_original_parts: arrangeInclude ? arrangeInclude.checked : true,
         cleanup_profile: arrangeCleanup ? arrangeCleanup.value : "natural",
+        arrangement_style: arrangeStyle ? arrangeStyle.value : "automatic",
+        include_drums: arrangeDrums ? arrangeDrums.checked : true,
+        dynamics: arrangeDynamics ? arrangeDynamics.value : "automatic",
       };
       btnArrange.disabled = true;
       btnArrange.textContent = "Criando arranjo...";
@@ -1095,8 +1360,164 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {}
   };
 
+  // ---- PIPELINE COMPLETO — Etapa 8.3 ----
+  const pipelineSection = document.getElementById("pipeline-section");
+  const btnPipeline = document.getElementById("btn-pipeline");
+  const pipelineStatus = document.getElementById("pipeline-status");
+  const pipelineProgress = document.getElementById("pipeline-progress");
+  const pipelineProgressBar = document.getElementById("pipeline-progress-bar");
+  const pipelineStagesList = document.getElementById("pipeline-stages-list");
+  let pipelinePollingInterval = null;
+  let currentPipelineJobId = null;
+
+  function updatePipelineStatus(message, type) {
+    if (!pipelineStatus) return;
+    pipelineStatus.textContent = message;
+    pipelineStatus.className = "status visible " + (type || "info");
+    pipelineStatus.style.display = "block";
+  }
+
+  function renderPipelineStages(stages, currentLabel) {
+    if (!pipelineStagesList) return;
+    const icons = { pending: "\u25CB", running: "\u2192", completed: "\u2713", failed: "\u2717", skipped: "\u21BB" };
+    let html = "";
+    for (const [name, s] of Object.entries(stages || {})) {
+      const icon = icons[s.status] || "\u25CB";
+      const cachedTag = s.cached ? " (reutilizada)" : "";
+      const progressTag = s.status === "running" && s.progress > 0 ? ` \u2014 ${s.progress}%` : "";
+      const color = s.status === "completed" ? "var(--success)" :
+                   s.status === "running" ? "var(--gold)" :
+                   s.status === "failed" ? "var(--danger)" : "var(--text-muted)";
+      html += `<div style="color:${color}">${icon} ${s.label}${cachedTag}${progressTag}</div>`;
+    }
+    if (currentLabel) {
+      html += `<div style="color:var(--text-secondary);margin-top:4px;font-size:12px">${currentLabel}</div>`;
+    }
+    pipelineStagesList.innerHTML = html;
+  }
+
+  async function pollPipelineJob(jobId) {
+    try {
+      const resp = await fetch(`/api/pipeline/status/${encodeURIComponent(jobId)}`);
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data) {
+        updatePipelineStatus("Erro ao consultar pipeline.", "error");
+        if (btnPipeline) btnPipeline.disabled = false;
+        clearInterval(pipelinePollingInterval);
+        pipelinePollingInterval = null;
+        return;
+      }
+      const status = data.status;
+      const pct = data.progress_percent || 0;
+
+      if (pipelineProgressBar) pipelineProgressBar.style.width = `${pct}%`;
+      renderPipelineStages(data.stages, data.current_stage_label);
+
+      if (status === "queued") {
+        updatePipelineStatus("Pipeline agendado...", "info");
+      } else if (status === "running") {
+        updatePipelineStatus(data.current_stage_label || "Processando...", "info");
+        if (btnPipeline) btnPipeline.disabled = true;
+      } else if (status === "completed") {
+        updatePipelineStatus("Pipeline concluído!", "success");
+        if (btnPipeline) { btnPipeline.disabled = false; btnPipeline.textContent = "Processar Novamente"; }
+        clearInterval(pipelinePollingInterval);
+        pipelinePollingInterval = null;
+        // Refresh all visible sections
+        if (currentFileId) {
+          checkExistingStems(currentFileId);
+          checkExistingTranscriptions(currentFileId);
+          checkExistingDrums(currentFileId);
+          checkExistingScore(currentFileId);
+          checkExistingArrangement(currentFileId);
+        }
+      } else if (status === "failed") {
+        updatePipelineStatus(data.error || "Pipeline falhou.", "error");
+        if (btnPipeline) { btnPipeline.disabled = false; btnPipeline.textContent = "Continuar Processamento"; }
+        clearInterval(pipelinePollingInterval);
+        pipelinePollingInterval = null;
+      }
+    } catch (e) {
+      updatePipelineStatus("Erro de conexão com pipeline.", "error");
+    }
+  }
+
+  if (btnPipeline) {
+    btnPipeline.addEventListener("click", async () => {
+      if (!currentFileId) {
+        updatePipelineStatus("Nenhum arquivo analisado.", "error");
+        return;
+      }
+      // Coleta config atual do frontend
+      const boxes = document.querySelectorAll("#arrange-instruments input[type=checkbox]:checked");
+      const instruments = Array.from(boxes).map((b) => b.value);
+      const arrangeStyle = document.getElementById("arrange-style");
+      const arrangeDrums = document.getElementById("arrange-include-drums");
+      const arrangeDynamics = document.getElementById("arrange-dynamics");
+      const arrangeInclude = document.getElementById("arrange-include-originals");
+      const arrangeCleanup = document.getElementById("arrange-cleanup");
+      const scoreTempo = document.getElementById("score-tempo");
+      const scoreTimesig = document.getElementById("score-timesig");
+      const scoreQuant = document.getElementById("score-quant");
+      const scoreKeymode = document.getElementById("score-keymode");
+      const scoreCleanup = document.getElementById("score-cleanup");
+
+      const payload = {
+        instruments,
+        arrangement_style: arrangeStyle ? arrangeStyle.value : "automatic",
+        include_drums: arrangeDrums ? arrangeDrums.checked : true,
+        include_original_parts: arrangeInclude ? arrangeInclude.checked : true,
+        dynamics: arrangeDynamics ? arrangeDynamics.value : "automatic",
+        cleanup_profile: scoreCleanup ? scoreCleanup.value : (arrangeCleanup ? arrangeCleanup.value : "natural"),
+        time_signature: scoreTimesig ? scoreTimesig.value : "4/4",
+        quantization: scoreQuant ? scoreQuant.value : "1/16",
+        key_mode: scoreKeymode ? scoreKeymode.value : "auto",
+        tempo: scoreTempo && scoreTempo.value ? Number(scoreTempo.value) : null,
+      };
+
+      btnPipeline.disabled = true;
+      btnPipeline.textContent = "Processando...";
+      updatePipelineStatus("Iniciando pipeline...", "info");
+      if (pipelineProgress) pipelineProgress.classList.remove("hidden");
+
+      try {
+        const resp = await fetch(`/api/pipeline/${encodeURIComponent(currentFileId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json().catch(() => null);
+        if (resp.status === 409) {
+          updatePipelineStatus((data && data.detail) || "Pipeline já em andamento.", "error");
+          btnPipeline.disabled = false;
+          btnPipeline.textContent = "Processar Música Completa";
+          return;
+        }
+        if (!resp.ok || !data || !data.job_id) {
+          updatePipelineStatus((data && (data.detail || data.message)) || "Não foi possível iniciar.", "error");
+          btnPipeline.disabled = false;
+          btnPipeline.textContent = "Processar Música Completa";
+          return;
+        }
+        currentPipelineJobId = data.job_id;
+        updatePipelineStatus("Pipeline agendado.", "info");
+        if (pipelinePollingInterval) clearInterval(pipelinePollingInterval);
+        pipelinePollingInterval = setInterval(() => pollPipelineJob(currentPipelineJobId), 1500);
+        setTimeout(() => pollPipelineJob(currentPipelineJobId), 500);
+      } catch (err) {
+        updatePipelineStatus("Erro ao iniciar pipeline.", "error");
+        btnPipeline.disabled = false;
+        btnPipeline.textContent = "Processar Música Completa";
+      }
+    });
+  }
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    // BUG FIX #9: cancela pollings de jobs do arquivo anterior
+    // Antes: polling de job A continuava após enviar arquivo B,
+    // causando cross-file contamination (stems de A exibidos com currentFileId = B)
+    cancelAllPolling();
     clearStatus();
     hideAudioInfo();
     hideMusicInfo();
@@ -1104,6 +1525,7 @@ document.addEventListener("DOMContentLoaded", () => {
     hideStemsInfo();
     hideTranscribeSection();
     hideTranscriptionInfo();
+    hideDrumsSection();
     hideScoreSection();
     lastMusic = null;
     currentFileId = null;

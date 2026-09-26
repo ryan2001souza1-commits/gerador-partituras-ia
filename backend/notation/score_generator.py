@@ -190,7 +190,8 @@ def get_music_context(file_id: str) -> Dict[str, Any]:
         logger.debug(f"music_analysis indisponível: {e}")
         return ctx
     try:
-        res = analyze_music(Path(upload_path))
+        # ETAPA 8.3: passa file_id para usar cache persistente
+        res = analyze_music(Path(upload_path), file_id=file_id)
         d = res.to_api_dict()
         if d.get("bpm_rounded"):
             ctx["tempo"] = int(d["bpm_rounded"])
@@ -199,9 +200,15 @@ def get_music_context(file_id: str) -> Dict[str, Any]:
         ctx["key"] = d.get("key")
         ctx["mode"] = d.get("mode")
         ctx["key_confidence"] = d.get("key_confidence")
+        # PERFORMANCE: first_beat_time já vem do analyze_music (extraído do
+        # beat_track interno). Elimina get_beat_grid() separado que
+        # re-decodificava o arquivo + executava HPSS + beat_track novamente
+        # (economia: ~30s para áudio de 3min).
+        first_beat_from_analysis = res.first_beat_time
     except Exception as e:
         logger.debug(f"analyze_music falhou p/ score ctx: {e}")
         ctx["warnings"].append("Análise musical indisponível para defaults.")
+        first_beat_from_analysis = None
     # Início das primeiras notas transcritas (refino do offset, Etapa 7).
     earliest_note: Optional[float] = None
     try:
@@ -224,14 +231,24 @@ def get_music_context(file_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"earliest_note falhou: {e}")
     try:
-        grid = get_beat_grid(Path(upload_path))
-        first_beat = grid.get("first_beat_time") if grid else None
+        # PERFORMANCE: usa first_beat_time do analyze_music (já computado no
+        # beat_track interno). Só chama get_beat_grid() como FALLBACK se a
+        # análise não conseguiu extrair o primeiro beat.
+        # Antes: get_beat_grid() era chamado SEMPRE, re-decodificando o
+        # arquivo e re-executando HPSS + beat_track (redundância ~30s).
+        first_beat = first_beat_from_analysis
+        beat_times_full = None
+        if first_beat is None:
+            # Fallback: análise não produziu first_beat, tenta beat grid dedicado
+            grid = get_beat_grid(Path(upload_path))
+            first_beat = grid.get("first_beat_time") if grid else None
+            beat_times_full = grid.get("beat_times") if grid else None
         ctx["first_beat_time"] = first_beat
         if first_beat is not None and ctx.get("tempo"):
             # Back-projection (Etapa 7): offset normalizado p/ dentro de 1 beat.
             ctx["beat_offset"] = float(estimate_beat_offset(
                 first_beat, ctx["tempo"],
-                beat_times=(grid.get("beat_times") if grid else None),
+                beat_times=beat_times_full,
                 earliest_note_time=earliest_note,
             ))
             ctx["beat_grid"] = True
